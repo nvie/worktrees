@@ -23,6 +23,9 @@ REPOS=(
 
 # Subdir patterns to prepend to CDPATH, mirroring the user's global CDPATH so
 # `cd <something>` from inside a group resolves to this group's worktree first.
+# The group root itself is always prepended too (see write_envrc_if_missing),
+# so per-repo entries (`liveblocks`, `admin`, …) aren't needed — they're
+# subsumed by the group root.
 CDPATH_SUBDIRS=(
   "liveblocks/packages"
   "liveblocks/tools"
@@ -30,11 +33,6 @@ CDPATH_SUBDIRS=(
   "liveblocks-backend/apps"
   "liveblocks-backend/shared"
   "liveblocks-backend/tools"
-  "liveblocks"
-  "liveblocks-backend"
-  "admin"
-  "liveblocks.io"
-  "zenrouter"
 )
 
 # 8-entry palette: "fg-ansi-index|bg-hex"
@@ -212,7 +210,8 @@ write_envrc_if_missing() {
     echo "export WORKTREE_COLOR_FG=\"$fg\""
     echo "export WORKTREE_COLOR_BG=\"$bg\""
     echo ""
-    echo "# Subdir patterns hardcoded in the script (mirrors your global CDPATH)."
+    echo "# Group root + a few container subdirs (mirrors your global CDPATH)."
+    echo "path_add CDPATH \"\$PWD\""
     local sub
     for sub in "${CDPATH_SUBDIRS[@]}"; do
       echo "path_add CDPATH \"\$PWD/$sub\""

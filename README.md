@@ -160,19 +160,18 @@ export WORKTREE_ROOT="$PWD"
 export WORKTREE_COLOR_FG="208"        # ANSI index, hashed from name
 export WORKTREE_COLOR_BG="#1a0d2e"    # hex, hashed from name
 
-# Subdir patterns hardcoded in the script (mirrors your global CDPATH).
+# Group root + a few container subdirs (mirrors your global CDPATH).
+path_add CDPATH "$PWD"
 path_add CDPATH "$PWD/liveblocks/packages"
 path_add CDPATH "$PWD/liveblocks/tools"
 path_add CDPATH "$PWD/liveblocks/schema-lang"
 path_add CDPATH "$PWD/liveblocks-backend/apps"
 path_add CDPATH "$PWD/liveblocks-backend/shared"
 path_add CDPATH "$PWD/liveblocks-backend/tools"
-path_add CDPATH "$PWD/liveblocks"
-path_add CDPATH "$PWD/liveblocks-backend"
-path_add CDPATH "$PWD/admin"
-path_add CDPATH "$PWD/liveblocks.io"
-path_add CDPATH "$PWD/zenrouter"
 ```
+
+The group root (`$PWD`) covers `cd liveblocks`, `cd liveblocks-backend`,
+`cd admin`, etc. without needing one entry per repo.
 
 The CDPATH list mirrors your global one (the one in `config.fish`) so
 `cd cloudflare` from inside the group resolves to
