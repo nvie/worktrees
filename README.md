@@ -495,6 +495,9 @@ The initial version assumes a fixed stack — no portability layer, no
 conditionals. If you don't have one of these, the tool won't work; that's
 fine for v1.
 
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) — the tool
+  generates Claude-specific config (`CLAUDE.md`, `.claude/settings.local.json`);
+  no fallback or alternative agent support
 - [Fish shell](https://fishshell.com/)
 - [Ghostty](https://ghostty.org/)
 - [direnv](https://direnv.net/) (hooked into Fish)
