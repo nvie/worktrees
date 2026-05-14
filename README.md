@@ -157,6 +157,10 @@ fine for v1.
   combination of repos be grouped — either via a config file or by selecting
   repos interactively at create time. The Liveblocks set becomes one preset
   among many.
+- **Generalize beyond fixed tools.** Drop the hard assumption of Fish +
+  Ghostty + direnv + git-toolbelt. Support at least Bash/Zsh prompts, generic
+  OSC 11 (or none), and a pure-`git` fallback for the dirty-check. The tool's
+  capabilities degrade gracefully based on what's actually installed.
 
 ## Non-goals
 
