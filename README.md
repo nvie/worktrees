@@ -47,6 +47,27 @@ visible dir gets annoying.)
 
 ## Usage
 
+```
+$ worktrees --help
+Coordinated multi-repo git worktrees
+
+Usage:
+  worktrees <name> [<base-branch>]   Create a worktree group
+  worktrees ls                       List existing groups
+  worktrees rm <name> [--force]      Remove a group
+  worktrees prune                    Sync source repos after manual cleanup
+  worktrees path <name>              Print a group's path
+
+Environment:
+  WORKTREE_ROOT   (default: $HOME/Desktop/worktrees)
+  SOURCE_ROOT     (default: $HOME/Projects/liveblocks)
+  DEFAULT_BASE    (default: origin/main)
+```
+
+> The `Environment:` section renders dimmed in the terminal.
+
+### Creating a group
+
 ```sh
 worktrees <name> [<base-branch>]
 ```
@@ -112,13 +133,20 @@ without losing the prompt marker.
 worktrees            # interactive picker (planned, see Roadmap)
 worktrees ls         # list existing groups
 worktrees rm <name>  # remove a group (asks for confirmation)
+worktrees prune      # `git worktree prune` in every source repo
 worktrees path <name> # print the group's path (for `cd (worktrees path foo)`)
 ```
 
 `rm` first checks **all** worktrees in the group for uncommitted changes and
 bails out before touching anything if any are dirty. Only once the whole group
 is verified clean does it run `git worktree remove` per repo and delete the
-group directory. Pass `--force` to skip the dirty check.
+group directory. Pass `--force` to skip the dirty check. At the end, `rm`
+also runs `git worktree prune` in each source repo as a safety net.
+
+`prune` is the escape hatch for "I deleted a group's directory by hand and
+now my source repos think the worktrees still exist." It runs `git worktree
+prune` in every repo listed in `REPOS`. Branches are left alone — delete them
+manually with `git branch -d <name>` if you want them gone.
 
 ## Configuration
 
