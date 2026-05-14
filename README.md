@@ -33,12 +33,18 @@ the same branch, all under one parent directory:
 ```
 ~/Desktop/worktrees/
 └── feature-xyz/
-    ├── .envrc
+    ├── .envrc                                   ← group env exports + CDPATH
+    ├── CLAUDE.md                                ← group context for Claude
     ├── liveblocks/
+    │   └── .claude/settings.local.json          ← additionalDirectories: 4 siblings
     ├── liveblocks-backend/
+    │   └── .claude/settings.local.json          ← (same shape)
     ├── admin/
+    │   └── .claude/settings.local.json
     ├── liveblocks.io/
+    │   └── .claude/settings.local.json
     └── zenrouter/
+        └── .claude/settings.local.json
 ```
 
 Desktop is the default home for groups so they're visible, easy to clean up,
@@ -101,10 +107,16 @@ worktrees tmp
    - Symlinks `<source>/.git/git-crypt/` into the worktree's git dir if the
      source has it, so the worktree shares the source's git-crypt key.
    - Copies every `ALLOW`-listed file from the source into the worktree,
-     preserving relative paths.
+     preserving relative paths (this includes `.claude/settings.local.json`
+     when source has one).
    - Runs `git checkout HEAD -- .` to materialize the working tree. Smudge
      filters run now; git-crypt decrypts cleanly.
-6. Writes the group's `.envrc`.
+   - Writes or mutates `.claude/settings.local.json` so its
+     `permissions.additionalDirectories` points at the four sibling worktrees
+     in this group (see [Claude config](#claude-config)).
+   - Appends `.claude/settings.local.json` to the worktree's
+     `info/exclude` to keep it out of `git status`.
+6. Writes the group's `.envrc` and `CLAUDE.md`.
 7. Prints a `cd` hint.
 
 `worktrees <name>` is **idempotent for the happy path**: re-running it on a
@@ -189,6 +201,47 @@ checkout, and any `.env`-type file that is itself git-crypt-encrypted (e.g.
 This is intentionally Liveblocks-specific bootstrap behavior. It'll be made
 generic when the tool drops its Liveblocks assumptions (see Roadmap).
 
+### Claude config (hardcoded)
+
+The goal: from inside any worktree of a group, a Claude session has **write
+access to all five sibling worktrees** — and never to the source checkouts.
+
+What the tool writes per group:
+
+1. **Group-level `CLAUDE.md`** at `<group>/CLAUDE.md`. Tells Claude in plain
+   English that this is a worktree group, lists the siblings, and instructs
+   it to interpret any `~/Projects/liveblocks/...` references in subordinate
+   `CLAUDE.md` files as relative to this group. Claude walks up from the
+   cwd to find this.
+
+2. **Per-worktree `.claude/settings.local.json`** at
+   `<group>/<repo>/.claude/settings.local.json`. Two cases:
+
+   - **Source has `.claude/settings.local.json`** — it travels via the
+     `ALLOW` copy step (your `permissions.allow` lists are preserved). After
+     copy, the tool uses `jq` to **replace** `permissions.additionalDirectories`
+     with the four sibling-worktree paths in this group.
+   - **Source doesn't have it** — the tool writes a fresh file with just the
+     four sibling-worktree paths in `permissions.additionalDirectories`.
+
+   Either way, every worktree ends up with `additionalDirectories` pointing
+   at the **other four worktrees in the group**, never at `~/Projects/...`.
+
+3. **`info/exclude` entry** in the linked worktree's git dir. After writing
+   `.claude/settings.local.json` the tool appends:
+
+   ```sh
+   echo '.claude/settings.local.json' \
+     >> <source>/.git/worktrees/<name>/info/exclude
+   ```
+
+   `info/exclude` in a linked worktree's git dir is **worktree-aware**: it
+   hides the file from `git status` in this worktree only, without touching
+   any tracked `.gitignore` and without affecting source or other worktrees.
+   Belt-and-suspenders against the file getting picked up in a `git add`.
+
+`jq` is therefore a hard dependency — see [Requirements](#requirements).
+
 ### `ALLOW` / `IGNORE` classification
 
 Every untracked or ignored path that `git status --ignored` reports in a
@@ -207,9 +260,15 @@ travels.
 Initial lists (hardcoded in the script):
 
 ```
-ALLOW  → .env, .env.*, .env.local
+ALLOW  → .env, .env.*, .env.local, settings.local.json
 IGNORE → node_modules, .next, dist, build, .turbo, .cache, coverage, *.log, …
 ```
+
+`settings.local.json` lands in ALLOW so a source repo's existing
+`.claude/settings.local.json` (your Bash allow lists, WebFetch domains, etc.)
+travels into the worktree. After the copy, the Claude-config step mutates
+its `permissions.additionalDirectories` to point at sibling worktrees — see
+[Claude config](#claude-config) below.
 
 The source of truth is `git status --ignored --porcelain` in each repo,
 which yields lines like:
@@ -361,6 +420,7 @@ fine for v1.
 - [Ghostty](https://ghostty.org/)
 - [direnv](https://direnv.net/) (hooked into Fish)
 - [git-toolbelt](https://github.com/nvie/git-toolbelt)
+- [`jq`](https://jqlang.org/) — for in-place mutation of `.claude/settings.local.json`
 - All five source repos cloned under `SOURCE_ROOT`
 
 ## Roadmap
