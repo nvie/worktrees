@@ -50,3 +50,33 @@ function __wt_on_group --on-variable WORKTREE_GROUP
         printf '\e]111\a' > /dev/tty
     end
 end
+
+
+# ─── `worktrees` wrapper: cd into the new group after a successful create ──
+#
+# After `worktrees tmp2`, you end up in `~/Desktop/worktrees/tmp2` (direnv
+# loads the .envrc, the chip appears, the tint kicks in). Subcommands
+# (ls / rm / path / prune / -h) pass through unchanged.
+
+function worktrees
+    set -l first $argv[1]
+    set -l subcommands ls rm path prune -h --help
+
+    if test -z "$first"; or contains -- $first $subcommands
+        command worktrees $argv
+        return $status
+    end
+
+    # Create flow: run the script, then cd on success.
+    command worktrees $argv
+    or return $status
+
+    # The group name is the first non-flag positional arg.
+    for arg in $argv
+        if not string match -q -- '--*' $arg
+            set -l p (command worktrees path $arg 2>/dev/null)
+            test -n "$p"; and cd "$p"
+            return 0
+        end
+    end
+end

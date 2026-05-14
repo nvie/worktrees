@@ -322,7 +322,7 @@ The `share/worktrees.fish` snippet (auto-loaded via the symlink above) makes
 `cd*` aliases, the prompt chip, and the terminal tint group-aware — all
 driven by the env vars from the group's `.envrc`.
 
-It defines three helpers:
+It defines three helpers and one wrapper:
 
 - **`wt_cd <rel-path>`** — routes `cd` to `$WORKTREE_ROOT/<rel>` when in a
   group, `$HOME/Projects/liveblocks/<rel>` otherwise.
@@ -332,6 +332,10 @@ It defines three helpers:
 - **`--on-variable WORKTREE_GROUP` handler** — emits OSC 11 with
   `$WORKTREE_COLOR_BG` to tint the terminal background when the group sets,
   emits the OSC 11 reset (`\e]111\a`) when it unsets.
+- **`worktrees` function wrapper** — after `worktrees tmp2` finishes
+  successfully, automatically `cd`s you into the new group dir so the
+  `.envrc` loads (and the chip + tint kick in) without a second command.
+  Subcommands (`ls`, `rm`, `path`, `prune`) pass through unchanged.
 
 ### Refactor your `cd*` aliases
 
