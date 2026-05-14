@@ -96,11 +96,16 @@ worktrees tmp
 3. Verifies `<base-branch>` exists in every repo. If it doesn't exist in some,
    prints the list and aborts — pick a different base, or create the missing
    branches in those source repos first.
-4. Classifies every untracked or ignored file across the source repos against
+4. Verifies that branch `<name>` isn't already checked out anywhere **outside
+   this group**. If it is (e.g., currently checked out in a source repo, or
+   in a worktree belonging to a different group), aborts with the conflicting
+   path so you can resolve it manually. Worktrees belonging to **this** group
+   are not a conflict — they're the idempotent-skip case.
+5. Classifies every untracked or ignored file across the source repos against
    the `ALLOW` / `IGNORE` lists (see [Per-repo bootstrap](#per-repo-bootstrap)).
    Aborts upfront with a clear list if anything is unclassified — before
    touching any worktree.
-5. For each repo that doesn't already have its worktree:
+6. For each repo that doesn't already have its worktree:
    - If branch `<name>` already exists locally, **reuses it**. Otherwise
      creates it from `<base-branch>`. Never errors on a pre-existing branch.
    - Runs `git worktree add --no-checkout` so smudge filters don't fire yet.
@@ -113,11 +118,15 @@ worktrees tmp
      filters run now; git-crypt decrypts cleanly.
    - Writes or mutates `.claude/settings.local.json` so its
      `permissions.additionalDirectories` points at the four sibling worktrees
-     in this group (see [Claude config](#claude-config)).
+     in this group (see [Claude config](#claude-config)). The `jq` mutation
+     runs on **every** create, so re-runs keep the list current.
    - Appends `.claude/settings.local.json` to the worktree's
      `info/exclude` to keep it out of `git status`.
-6. Writes the group's `.envrc` and `CLAUDE.md`.
-7. Prints a `cd` hint.
+7. Writes the group's `.envrc` and `CLAUDE.md` **only if they don't already
+   exist**. On idempotent re-run they're left alone, so any tweaks you've
+   made (custom colors, additional env vars, edited CLAUDE.md context) are
+   preserved. To refresh from the current template, `rm` the file and re-run.
+8. Prints a `cd` hint.
 
 `worktrees <name>` is **idempotent for the happy path**: re-running it on a
 group skips repos already set up and sets up any that aren't. Use it freely
@@ -360,10 +369,12 @@ loaded:
   (`\e]11;#RRGGBB\a`), reset on direnv unload.
 
 Each group's color is picked from a palette via a hash of its name, so
-`feature-xyz` always looks the same. The OSC 11 tint is still subject to a
-Ghostty smoke test that hasn't happened yet — if it misbehaves, the snippet's
-`--on-variable` handler is the one place to disable it without losing the
-chip.
+`feature-xyz` always looks the same. **Don't like the color picked?** Edit
+`$WORKTREE_COLOR_FG` and `$WORKTREE_COLOR_BG` in the group's `.envrc` —
+the tool won't touch it on idempotent re-runs (see [What it does](#what-it-does)
+step 7). The OSC 11 tint is still subject to a Ghostty smoke test that
+hasn't happened yet — if it misbehaves, the snippet's `--on-variable`
+handler is the one place to disable it without losing the chip.
 
 ## Other commands
 
