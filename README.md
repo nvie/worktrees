@@ -123,16 +123,32 @@ export WORKTREE_ROOT="$PWD"
 export WORKTREE_COLOR_FG="208"        # ANSI index, hashed from name
 export WORKTREE_COLOR_BG="#1a0d2e"    # hex, hashed from name
 
+# Subdir patterns hardcoded in the script (mirrors your global CDPATH).
+path_add CDPATH "$PWD/liveblocks/packages"
+path_add CDPATH "$PWD/liveblocks/tools"
+path_add CDPATH "$PWD/liveblocks/schema-lang"
+path_add CDPATH "$PWD/liveblocks-backend/apps"
+path_add CDPATH "$PWD/liveblocks-backend/shared"
+path_add CDPATH "$PWD/liveblocks-backend/tools"
 path_add CDPATH "$PWD/liveblocks"
 path_add CDPATH "$PWD/liveblocks-backend"
-# … one per repo …
+path_add CDPATH "$PWD/admin"
+path_add CDPATH "$PWD/liveblocks.io"
+path_add CDPATH "$PWD/zenrouter"
 ```
 
-Everything beyond that — group-aware `cd*` aliases, prompt chip, terminal
-tint — is driven off those env vars by the fish snippet (see
-[Fish setup](#fish-setup)). direnv unloads the env when you `cd` out of the
-group, so the snippet automatically flips back to source paths, hides the
-chip, and resets the tint.
+The CDPATH list mirrors your global one (the one in `config.fish`) so
+`cd cloudflare` from inside the group resolves to
+`$WORKTREE_ROOT/liveblocks-backend/apps/cloudflare` instead of falling
+through to the source checkout. The list lives at the top of the script
+alongside `REPOS` and the `ALLOW`/`IGNORE` patterns — same hardcoded-for-
+Liveblocks spirit, same place to edit when something is added.
+
+Everything beyond the env exports and CDPATH — group-aware `cd*` aliases,
+prompt chip, terminal tint — is driven off those env vars by the fish
+snippet (see [Fish setup](#fish-setup)). direnv unloads the env when you
+`cd` out of the group, so the snippet automatically flips back to source
+paths, hides the chip, and resets the tint.
 
 ## Per-repo bootstrap
 
