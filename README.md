@@ -89,12 +89,27 @@ worktrees tmp
 2. Runs `git fetch` in each source checkout.
 3. Verifies `<base-branch>` exists in every repo. If it doesn't exist in some,
    prints the list and asks whether to skip those repos or abort.
-4. Creates `git worktree add -b <name> <path> <base-branch>` for each repo.
-5. Writes an `.envrc` at the group root (see below).
-6. Prints a `cd` hint to drop into the new group.
+4. Classifies every untracked or ignored file across the source repos against
+   the `ALLOW` / `IGNORE` lists (see [Per-repo bootstrap](#per-repo-bootstrap)).
+   Aborts upfront with a clear list if anything is unclassified — before
+   touching any worktree.
+5. For each repo that doesn't already have its worktree:
+   - If branch `<name>` already exists locally, **reuses it**. Otherwise
+     creates it from `<base-branch>`. Never errors on a pre-existing branch.
+   - Runs `git worktree add --no-checkout` so smudge filters don't fire yet.
+   - Symlinks `<source>/.git/git-crypt/` into the worktree's git dir if the
+     source has it, so the worktree shares the source's git-crypt key.
+   - Copies every `ALLOW`-listed file from the source into the worktree,
+     preserving relative paths.
+   - Runs `git checkout HEAD -- .` to materialize the working tree. Smudge
+     filters run now; git-crypt decrypts cleanly.
+6. Writes the group's `.envrc`.
+7. Prints a `cd` hint.
 
-If the group already exists, the command is a no-op (no clobbering) and just
-prints the path.
+`worktrees <name>` is **idempotent**. Re-running it on an existing group is
+safe: repos that already have their worktree are skipped, repos that don't
+get set up now. Use it freely to create, switch back to, or repair a group
+after a partial / interrupted create.
 
 ### The `.envrc`
 
@@ -111,6 +126,69 @@ direnv):
 
 The aliases and CDPATH are scoped to the direnv session; leaving the directory
 restores your normal config.
+
+## Per-repo bootstrap
+
+A fresh worktree starts from `git worktree add`, which only materializes
+**tracked** files. Anything untracked or ignored stays in the source
+checkout. Some of that you want in the new worktree (your local `.env`s);
+some you very much don't (a 4 GB `node_modules`). `worktrees` resolves
+this with one hardcoded special case and two explicit lists.
+
+### git-crypt (hardcoded)
+
+When a source repo has `.git/git-crypt/` — i.e., git-crypt is initialized
+and unlocked — the tool symlinks that whole directory into the worktree's
+git dir before checkout:
+
+```
+<wt>/.git/worktrees/<name>/git-crypt → <source>/.git/git-crypt
+```
+
+The smudge filter then finds the source's key, encrypted files decrypt on
+checkout, and any `.env`-type file that is itself git-crypt-encrypted (e.g.
+`admin/.env`, `liveblocks.io/.env`) comes along for free — no copy needed.
+
+This is intentionally Liveblocks-specific bootstrap behavior. It'll be made
+generic when the tool drops its Liveblocks assumptions (see Roadmap).
+
+### `ALLOW` / `IGNORE` classification
+
+Every untracked or ignored path that `git status --ignored` reports in a
+source repo must classify as one of:
+
+- **`ALLOW`** — copied into the worktree at the same relative path
+- **`IGNORE`** — left in the source, not copied
+
+Anything matching neither aborts the create with a clear list of the
+unclassified paths. The fix is to add a glob to the appropriate list in the
+script and re-run. The lists are deliberately small and explicit so that the
+first time you encounter something unfamiliar — a new ignored build dir, an
+unfamiliar env file — you make a one-line decision about whether it
+travels.
+
+Initial lists (hardcoded in the script):
+
+```
+ALLOW  → .env, .env.*, .env.local
+IGNORE → node_modules, .next, dist, build, .turbo, .cache, coverage, *.log, …
+```
+
+The source of truth is `git status --ignored --porcelain` in each repo,
+which yields lines like:
+
+```
+?? .env.local
+!! node_modules/
+!! examples/foo/build/output.log
+```
+
+Each path is normalized (strip the `?? ` / `!! ` prefix, strip any trailing
+`/`, take the basename) and matched against the lists with a bash `case`
+block — so the globs are shell-glob, not regex. Matching is against the
+**basename only**, so a single `node_modules` entry catches both
+`<repo>/node_modules` and `<repo>/examples/foo/node_modules`, and `*.log`
+matches any file ending in `.log` regardless of where it sits in the tree.
 
 ## Visual markers
 
@@ -138,15 +216,26 @@ worktrees path <name> # print the group's path (for `cd (worktrees path foo)`)
 ```
 
 `rm` first checks **all** worktrees in the group for uncommitted changes and
-bails out before touching anything if any are dirty. Only once the whole group
-is verified clean does it run `git worktree remove` per repo and delete the
-group directory. Pass `--force` to skip the dirty check. At the end, `rm`
-also runs `git worktree prune` in each source repo as a safety net.
+bails out before touching anything if any are dirty. Only once the whole
+group is verified clean does it run `git worktree remove` per repo and
+delete the group directory. Pass `--force` to skip the dirty check (and
+force-remove the worktree dir if `worktree remove` itself refuses — losing
+the worktree is recoverable; we can always re-create it). At the end, `rm`
+runs `git worktree prune` in each source repo as a safety net.
+
+**`rm` never deletes branches.** That's deliberate — a branch may carry
+unpushed commits that are genuinely worth keeping even when the worktree is
+gone, and losing real work to a bash one-liner is the kind of regret we'd
+rather avoid. Not even `--force` deletes branches. If you want a branch
+gone too, run `git branch -d <name>` (safe — refuses if unmerged) or
+`git branch -D <name>` (forces) in each source repo by hand. Or: just
+re-run `worktrees <name>` later — it'll reuse the existing branch.
+
+A `--force-delete-branch` flag may land later. For now, keeping branches is
+the conservative default.
 
 `prune` is the escape hatch for "I deleted a group's directory by hand and
-now my source repos think the worktrees still exist." It runs `git worktree
-prune` in every repo listed in `REPOS`. Branches are left alone — delete them
-manually with `git branch -d <name>` if you want them gone.
+now my source repos think the worktrees still exist." It runs `git worktree prune` in every repo listed in `REPOS`. Like `rm`, it leaves branches alone.
 
 ## Configuration
 
