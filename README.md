@@ -396,10 +396,25 @@ worktrees prune      # `git worktree prune` in every source repo
 worktrees path <name> # print the group's path (for `cd (worktrees path foo)`)
 ```
 
-`ls` prints one group name per line, alphabetical. No path, no status, no
-header — pipe-friendly for `fzf`, `xargs`, `head`. A richer view is what the
-future TUI (Roadmap) is for; for now `--long` doesn't exist (add when
-needed).
+`ls` prints one group name per line, alphabetical, on **stdout**. No path,
+no status, no header — pipe-friendly for `fzf`, `xargs`, `head`. A richer
+view is what the future TUI (Roadmap) is for; for now `--long` doesn't
+exist (add when needed).
+
+On **stderr**, `ls` emits a one-line warning per group whose worktrees
+aren't all on the group's own branch. Reading `<source>/.git/worktrees/<name>/HEAD`
+for each repo (one tiny file read each) tells us the current branch
+without spawning git. Mismatches surface like:
+
+```
+warning: feature-xyz: 1 of 5 worktrees off-branch (liveblocks-backend → main)
+```
+
+Stdout stays clean — `worktrees ls | fzf` never sees the warning. Cases
+that trigger it: someone `git checkout`ed inside the worktree and forgot to
+switch back, a worktree on detached HEAD, or an orphaned admin entry. If
+the warnings become noise for a long-lived `tmp`-style group, we can add
+`--quiet` or a per-group marker later.
 
 `rm` first checks **all** worktrees in the group for uncommitted changes and
 bails out before touching anything if any are dirty. Only once the whole
