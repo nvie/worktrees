@@ -107,10 +107,24 @@ worktrees tmp
 6. Writes the group's `.envrc`.
 7. Prints a `cd` hint.
 
-`worktrees <name>` is **idempotent**. Re-running it on an existing group is
-safe: repos that already have their worktree are skipped, repos that don't
-get set up now. Use it freely to create, switch back to, or repair a group
-after a partial / interrupted create.
+`worktrees <name>` is **idempotent for the happy path**: re-running it on a
+group skips repos already set up and sets up any that aren't. Use it freely
+to create, switch back to, or extend a group.
+
+If a previous run failed mid-flow and left a **hollow worktree** (git admin
+entry exists, working tree empty), recovery is a manual one-liner:
+
+```sh
+rm -rf ~/Desktop/worktrees/<name>     # or just the broken sub-repo dir
+worktrees <name>                       # re-run
+```
+
+That falls into the "orphaned admin entry" case (dir gone, git still aware),
+which the tool handles by silently running `git worktree prune` in each
+source repo, then proceeding with the full create flow. The branch is
+reused if it already exists locally (so no commits are lost). v1
+intentionally doesn't try to auto-detect or auto-repair half-applied state
+beyond that — `rm -rf + re-run` is the supported recovery path.
 
 ### The `.envrc`
 
