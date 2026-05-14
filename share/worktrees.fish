@@ -32,7 +32,7 @@ end
 function wt_prompt_segment
     set -q WORKTREE_GROUP; or return
     set_color $WORKTREE_COLOR_FG
-    printf '[%s] ' "$WORKTREE_GROUP"
+    printf ' [%s]' "$WORKTREE_GROUP"
     set_color normal
 end
 

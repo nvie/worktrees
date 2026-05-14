@@ -65,7 +65,7 @@ Usage:
   worktrees path <name>              Print a group's path
 
 Environment:
-  WORKTREE_ROOT   (default: $HOME/Desktop/worktrees)
+  WORKTREES_DIR   (default: $HOME/Desktop/worktrees)
   SOURCE_ROOT     (default: $HOME/Projects/liveblocks)
   DEFAULT_BASE    (default: origin/main)
 ```
@@ -455,7 +455,7 @@ into a phantom path).
 
 Defaults live at the top of the script. Likely things to tweak:
 
-- `WORKTREE_ROOT` — default `~/Desktop/worktrees`
+- `WORKTREES_DIR` — default `~/Desktop/worktrees`
 - `SOURCE_ROOT` — default `~/Projects/liveblocks`
 - `REPOS` — the list of repo dir names to include
 - `DEFAULT_BASE` — default `origin/main`
