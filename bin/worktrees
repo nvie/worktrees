@@ -326,9 +326,22 @@ setup_one_repo() {
 # ─── Subcommand: create ─────────────────────────────────────────────────────
 
 cmd_create() {
-  local name="${1:-}"
-  local base="${2:-$DEFAULT_BASE}"
-  [[ -n "$name" ]] || die "Usage: worktrees <name> [<base-branch>]"
+  local name="" base="" do_fetch=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --fetch) do_fetch=1 ;;
+      -*)      die "Unknown flag: $1" ;;
+      *)
+        if [[ -z "$name" ]];      then name="$1"
+        elif [[ -z "$base" ]];    then base="$1"
+        else die "Usage: worktrees <name> [<base-branch>] [--fetch]"
+        fi
+        ;;
+    esac
+    shift
+  done
+  [[ -n "$name" ]] || die "Usage: worktrees <name> [<base-branch>] [--fetch]"
+  base="${base:-$DEFAULT_BASE}"
 
   # Pre-flight: source repos exist
   local repo
@@ -337,11 +350,14 @@ cmd_create() {
       || die "Source repo missing: $(source_dir "$repo")"
   done
 
-  # Pre-flight: fetch in each source
-  step "Fetching: ${REPOS[*]}"
-  for repo in "${REPOS[@]}"; do
-    git -C "$(source_dir "$repo")" fetch --quiet
-  done
+  # Pre-flight: fetch in each source (only if --fetch passed; skipped by
+  # default since it's the slow step and you usually already fetched recently)
+  if (( do_fetch == 1 )); then
+    step "Fetching: ${REPOS[*]}"
+    for repo in "${REPOS[@]}"; do
+      git -C "$(source_dir "$repo")" fetch --quiet
+    done
+  fi
 
   # Pre-flight: base exists everywhere
   local missing=()
@@ -540,11 +556,11 @@ usage() {
 Coordinated multi-repo git worktrees
 
 Usage:
-  worktrees <name> [<base-branch>]   Create a worktree group
-  worktrees ls                       List existing groups
-  worktrees rm <name> [--force]      Remove a group
-  worktrees prune                    Sync source repos after manual cleanup
-  worktrees path <name>              Print a group's path
+  worktrees <name> [<base>] [--fetch]   Create a worktree group
+  worktrees ls                          List existing groups
+  worktrees rm <name> [--force]         Remove a group
+  worktrees prune                       Sync source repos after manual cleanup
+  worktrees path <name>                 Print a group's path
 
 ${C_DIM}Environment:
   WORKTREES_DIR   (default: \$HOME/Desktop/worktrees)

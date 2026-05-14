@@ -58,11 +58,11 @@ $ worktrees --help
 Coordinated multi-repo git worktrees
 
 Usage:
-  worktrees <name> [<base-branch>]   Create a worktree group
-  worktrees ls                       List existing groups
-  worktrees rm <name> [--force]      Remove a group
-  worktrees prune                    Sync source repos after manual cleanup
-  worktrees path <name>              Print a group's path
+  worktrees <name> [<base>] [--fetch]   Create a worktree group
+  worktrees ls                          List existing groups
+  worktrees rm <name> [--force]         Remove a group
+  worktrees prune                       Sync source repos after manual cleanup
+  worktrees path <name>                 Print a group's path
 
 Environment:
   WORKTREES_DIR   (default: $HOME/Desktop/worktrees)
@@ -92,7 +92,10 @@ worktrees tmp
 ### What it does
 
 1. Creates `~/Desktop/worktrees/<name>/` if it doesn't exist.
-2. Runs `git fetch` in each source checkout.
+2. Runs `git fetch` in each source checkout — **only when `--fetch` is
+   passed**. Off by default (the slow step; you usually already fetched
+   recently). Pass `--fetch` when you want to make sure `<base-branch>` is
+   up to date before branching.
 3. Verifies `<base-branch>` exists in every repo. If it doesn't exist in some,
    prints the list and aborts — pick a different base, or create the missing
    branches in those source repos first.
