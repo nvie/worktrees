@@ -454,6 +454,11 @@ Removing worktrees/feature-xyz: gitdir file points to non-existent location
 
 Like `rm`, `prune` leaves branches alone.
 
+`path` prints the group's directory to stdout and exits 0. If the group
+doesn't exist, it prints an error to stderr and exits 1 (so wrappers like
+`cd (worktrees path foo)` fail fast with a clear message instead of `cd`ing
+into a phantom path).
+
 ## Configuration
 
 Defaults live at the top of the script. Likely things to tweak:
