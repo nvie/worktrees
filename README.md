@@ -88,7 +88,8 @@ worktrees tmp
 1. Creates `~/Desktop/worktrees/<name>/` if it doesn't exist.
 2. Runs `git fetch` in each source checkout.
 3. Verifies `<base-branch>` exists in every repo. If it doesn't exist in some,
-   prints the list and asks whether to skip those repos or abort.
+   prints the list and aborts — pick a different base, or create the missing
+   branches in those source repos first.
 4. Classifies every untracked or ignored file across the source repos against
    the `ALLOW` / `IGNORE` lists (see [Per-repo bootstrap](#per-repo-bootstrap)).
    Aborts upfront with a clear list if anything is unclassified — before
@@ -113,19 +114,25 @@ after a partial / interrupted create.
 
 ### The `.envrc`
 
-The generated `.envrc` does three things when you `cd` into the group dir (via
-direnv):
+The generated `.envrc` is purely declarative — it exports the group's
+context and prepends each repo to `CDPATH`:
 
-- **Rewrites the `cd*` aliases** (`cdf`, `cdbb`, `cdr`, …) so they jump to the
-  group's copy of each repo instead of `~/Projects/liveblocks/...`.
-- **Replaces `CDPATH`** with the group's equivalent entries — `cd cloudflare`
-  resolves to `<group>/liveblocks-backend/apps/cloudflare`, not the source
-  checkout.
-- **Marks the shell** so the prompt and (optionally) the Ghostty background
-  reflect the active group.
+```sh
+export WORKTREE_GROUP="feature-xyz"
+export WORKTREE_ROOT="$PWD"
+export WORKTREE_COLOR_FG="208"        # ANSI index, hashed from name
+export WORKTREE_COLOR_BG="#1a0d2e"    # hex, hashed from name
 
-The aliases and CDPATH are scoped to the direnv session; leaving the directory
-restores your normal config.
+path_add CDPATH "$PWD/liveblocks"
+path_add CDPATH "$PWD/liveblocks-backend"
+# … one per repo …
+```
+
+Everything beyond that — group-aware `cd*` aliases, prompt chip, terminal
+tint — is driven off those env vars by the fish snippet (see
+[Fish setup](#fish-setup)). direnv unloads the env when you `cd` out of the
+group, so the snippet automatically flips back to source paths, hides the
+chip, and resets the tint.
 
 ## Per-repo bootstrap
 
@@ -190,27 +197,80 @@ block — so the globs are shell-glob, not regex. Matching is against the
 `<repo>/node_modules` and `<repo>/examples/foo/node_modules`, and `*.log`
 matches any file ending in `.log` regardless of where it sits in the tree.
 
+## Fish setup
+
+One-time per machine. Makes `cd*` aliases, the prompt chip, and the terminal
+tint group-aware — all driven by the env vars from the group's `.envrc`.
+
+The tool ships `share/worktrees.fish`. Source it from your `config.fish`:
+
+```fish
+source /path/to/worktrees/share/worktrees.fish
+```
+
+The snippet defines three helpers:
+
+- **`wt_cd <rel-path>`** — routes `cd` to `$WORKTREE_ROOT/<rel>` when in a
+  group, `$HOME/Projects/liveblocks/<rel>` otherwise.
+- **`wt_prompt_segment`** — emits `[feature-xyz]` colored by
+  `$WORKTREE_COLOR_FG` when in a group; outputs nothing otherwise. You call
+  it from your `fish_prompt`.
+- **`--on-variable WORKTREE_GROUP` handler** — emits OSC 11 with
+  `$WORKTREE_COLOR_BG` to tint the terminal background when the group sets,
+  emits the OSC 11 reset (`\e]111\a`) when it unsets.
+
+### Refactor your `cd*` aliases
+
+Rewrite each from a hardcoded path to a `wt_cd` call:
+
+```fish
+# Before
+alias cdf 'cd ~/Projects/liveblocks/liveblocks-backend/apps/cloudflare'
+alias cdrc 'cd ~/Projects/liveblocks/liveblocks/packages/liveblocks-react-ui'
+
+# After
+function cdf;  wt_cd 'liveblocks-backend/apps/cloudflare'; end
+function cdrc; wt_cd 'liveblocks/packages/liveblocks-react-ui'; end
+```
+
+~30 mechanical edits in one sitting. The rel-path is now the only varying
+piece — no more typing `~/Projects/liveblocks/` everywhere.
+
+### Add the chip to your prompt
+
+Drop a call to `wt_prompt_segment` into your `fish_prompt`, wherever you want
+the `[group-name]` chip to appear (typically right after the cwd):
+
+```fish
+function fish_prompt
+  # … cwd, git status, etc. …
+  wt_prompt_segment
+  # … rest of prompt …
+end
+```
+
 ## Visual markers
 
-Each group gets a stable color derived from its name (hash → palette index),
-so `feature-xyz` always looks the same across sessions.
+What you get once the fish snippet is sourced and the group's `.envrc` is
+loaded:
 
-- **Prompt segment**: a colored `[feature-xyz]` chip prepended to the Fish
-  prompt.
-- **Ghostty background**: a subtle dark tint (dark purple / blue / green /
-  brown / …), close enough to black to stay readable but distinct at a glance.
-  Emitted via the OSC 11 escape sequence (`\e]11;#RRGGBB\a`).
+- **Prompt chip** — `[feature-xyz]` rendered in the group's color (stable
+  across sessions, hashed from the name) by `wt_prompt_segment`.
+- **Terminal background** — a subtle dark tint via OSC 11
+  (`\e]11;#RRGGBB\a`), reset on direnv unload.
 
-Background tinting is opt-in and easy to disable per-group or globally — see
-_Configuration_ below. It's experimental; if it gets annoying, kill it
-without losing the prompt marker.
+Each group's color is picked from a palette via a hash of its name, so
+`feature-xyz` always looks the same. The OSC 11 tint is still subject to a
+Ghostty smoke test that hasn't happened yet — if it misbehaves, the snippet's
+`--on-variable` handler is the one place to disable it without losing the
+chip.
 
 ## Other commands
 
 ```sh
 worktrees            # interactive picker (planned, see Roadmap)
 worktrees ls         # list existing groups
-worktrees rm <name>  # remove a group (asks for confirmation)
+worktrees rm <name>  # remove a group
 worktrees prune      # `git worktree prune` in every source repo
 worktrees path <name> # print the group's path (for `cd (worktrees path foo)`)
 ```
@@ -245,8 +305,10 @@ Defaults live at the top of the script. Likely things to tweak:
 - `SOURCE_ROOT` — default `~/Projects/liveblocks`
 - `REPOS` — the list of repo dir names to include
 - `DEFAULT_BASE` — default `origin/main`
-- `TINT_BG` — `true` / `false` (emits OSC 11 to tint the terminal background)
-- `PALETTE` — the set of `(prompt-color, bg-color)` pairs to cycle through
+- `PALETTE` — `(fg-ansi-index, bg-hex)` pairs; a hash of the group name picks
+  one and is exported as `$WORKTREE_COLOR_FG` / `$WORKTREE_COLOR_BG` in the
+  group's `.envrc`. The fish snippet renders the chip and the OSC 11 tint
+  from those.
 
 ## Requirements
 
