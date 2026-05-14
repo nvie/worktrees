@@ -101,19 +101,16 @@ worktrees tmp
    in a worktree belonging to a different group), aborts with the conflicting
    path so you can resolve it manually. Worktrees belonging to **this** group
    are not a conflict — they're the idempotent-skip case.
-5. Classifies every untracked or ignored file across the source repos against
-   the `ALLOW` / `IGNORE` lists (see [Per-repo bootstrap](#per-repo-bootstrap)).
-   Aborts upfront with a clear list if anything is unclassified — before
-   touching any worktree.
-6. For each repo that doesn't already have its worktree:
+5. For each repo that doesn't already have its worktree:
    - If branch `<name>` already exists locally, **reuses it**. Otherwise
      creates it from `<base-branch>`. Never errors on a pre-existing branch.
    - Runs `git worktree add --no-checkout` so smudge filters don't fire yet.
    - Symlinks `<source>/.git/git-crypt/` into the worktree's git dir if the
      source has it, so the worktree shares the source's git-crypt key.
-   - Copies every `ALLOW`-listed file from the source into the worktree,
-     preserving relative paths (this includes `.claude/settings.local.json`
-     when source has one).
+   - Copies every untracked/ignored file that matches `COPY_PATTERNS` from
+     the source into the worktree, preserving relative paths (this includes
+     `.claude/settings.local.json` when source has one). Anything not
+     matching is silently skipped — see [What gets copied](#what-gets-copied-copy_patterns).
    - Runs `git checkout HEAD -- .` to materialize the working tree. Smudge
      filters run now; git-crypt decrypts cleanly.
    - Writes or mutates `.claude/settings.local.json` so its
@@ -122,11 +119,11 @@ worktrees tmp
      runs on **every** create, so re-runs keep the list current.
    - Appends `.claude/settings.local.json` to the worktree's
      `info/exclude` to keep it out of `git status`.
-7. Writes the group's `.envrc` and `CLAUDE.md` **only if they don't already
+6. Writes the group's `.envrc` and `CLAUDE.md` **only if they don't already
    exist**. On idempotent re-run they're left alone, so any tweaks you've
    made (custom colors, additional env vars, edited CLAUDE.md context) are
    preserved. To refresh from the current template, `rm` the file and re-run.
-8. Prints a `cd` hint.
+7. Prints a `cd` hint.
 
 `worktrees <name>` is **idempotent for the happy path**: re-running it on a
 group skips repos already set up and sets up any that aren't. Use it freely
@@ -178,8 +175,8 @@ The CDPATH list mirrors your global one (the one in `config.fish`) so
 `cd cloudflare` from inside the group resolves to
 `$WORKTREE_ROOT/liveblocks-backend/apps/cloudflare` instead of falling
 through to the source checkout. The list lives at the top of the script
-alongside `REPOS` and the `ALLOW`/`IGNORE` patterns — same hardcoded-for-
-Liveblocks spirit, same place to edit when something is added.
+alongside `REPOS` and `COPY_PATTERNS` — same hardcoded-for-Liveblocks
+spirit, same place to edit when something is added.
 
 Everything beyond the env exports and CDPATH — group-aware `cd*` aliases,
 prompt chip, terminal tint — is driven off those env vars by the fish
@@ -237,9 +234,10 @@ What the tool writes per group:
    this README. Two cases:
 
    - **Source has `.claude/settings.local.json`** — it travels via the
-     `ALLOW` copy step (your `permissions.allow` lists are preserved). After
-     copy, the tool uses `jq` to **replace** `permissions.additionalDirectories`
-     with the four sibling-worktree paths in this group.
+     `COPY_PATTERNS` step (your `permissions.allow` lists are preserved).
+     After copy, the tool uses `jq` to **replace**
+     `permissions.additionalDirectories` with the four sibling-worktree paths
+     in this group.
    - **Source doesn't have it** — the tool writes a fresh file with just the
      four sibling-worktree paths in `permissions.additionalDirectories`.
 
@@ -261,29 +259,21 @@ What the tool writes per group:
 
 `jq` is therefore a hard dependency — see [Requirements](#requirements).
 
-### `ALLOW` / `IGNORE` classification
+### What gets copied (`COPY_PATTERNS`)
 
-Every untracked or ignored path that `git status --ignored` reports in a
-source repo must classify as one of:
+Every untracked or ignored path that `git status --ignored` reports in each
+source repo is matched by **basename glob** against `COPY_PATTERNS`.
+Matches are copied into the worktree at the same relative path. Everything
+else is silently skipped — `.DS_Store`, `node_modules`, `*.tsbuildinfo`,
+build dirs, IDE state, the long tail.
 
-- **`ALLOW`** — copied into the worktree at the same relative path
-- **`IGNORE`** — left in the source, not copied
-
-Anything matching neither aborts the create with a clear list of the
-unclassified paths. The fix is to add a glob to the appropriate list in the
-script and re-run. The lists are deliberately small and explicit so that the
-first time you encounter something unfamiliar — a new ignored build dir, an
-unfamiliar env file — you make a one-line decision about whether it
-travels.
-
-Initial lists (hardcoded in the script):
+Initial list (hardcoded at the top of the script):
 
 ```
-ALLOW  → .env, .env.*, .env.local, settings.local.json
-IGNORE → node_modules, .next, dist, build, .turbo, .cache, coverage, *.log, …
+COPY_PATTERNS → .env, .env.*, settings.local.json
 ```
 
-`settings.local.json` lands in ALLOW so a source repo's existing
+`settings.local.json` is in here so a source repo's existing
 `.claude/settings.local.json` (your Bash allow lists, WebFetch domains, etc.)
 travels into the worktree. After the copy, the Claude-config step mutates
 its `permissions.additionalDirectories` to point at sibling worktrees — see
@@ -293,17 +283,19 @@ The source of truth is `git status --ignored --porcelain` in each repo,
 which yields lines like:
 
 ```
-?? .env.local
-!! node_modules/
-!! examples/foo/build/output.log
+?? .env.local           ← matches `.env.*` → copied
+!! node_modules/        ← no match → skipped
+?? .DS_Store            ← no match → skipped
 ```
 
 Each path is normalized (strip the `?? ` / `!! ` prefix, strip any trailing
-`/`, take the basename) and matched against the lists with a bash `case`
-block — so the globs are shell-glob, not regex. Matching is against the
-**basename only**, so a single `node_modules` entry catches both
-`<repo>/node_modules` and `<repo>/examples/foo/node_modules`, and `*.log`
-matches any file ending in `.log` regardless of where it sits in the tree.
+`/`, take the basename) and tested against `COPY_PATTERNS` with a bash
+`case` block — so the globs are shell-glob, not regex. Matching is against
+the **basename only**, so a single `.env.*` entry catches `.env.local`
+anywhere in the tree.
+
+If you discover a file type that *should* travel and currently isn't, add
+a glob to `COPY_PATTERNS` at the top of the script.
 
 ## Installation
 

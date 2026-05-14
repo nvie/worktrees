@@ -50,28 +50,15 @@ PALETTE=(
   "151|#0d2e1a"   # teal
 )
 
-# ALLOW: copied from source to worktree (basename glob match)
-# IGNORE: not copied (basename glob match)
-# Anything matching neither aborts the create with a clear list of paths.
-ALLOW_PATTERNS=(
+# Untracked/ignored files that should still travel into each worktree.
+# Basename glob match against `git status --ignored --porcelain` output.
+# Anything not matching is silently skipped (build artifacts, .DS_Store,
+# node_modules, etc. — the long tail). If you discover a file type that
+# should travel and currently doesn't, add a glob here.
+COPY_PATTERNS=(
   ".env"
   ".env.*"
   "settings.local.json"
-)
-IGNORE_PATTERNS=(
-  "node_modules"
-  ".next"
-  "dist"
-  "build"
-  ".turbo"
-  ".cache"
-  "coverage"
-  "*.log"
-  ".nyc_output"
-  ".parcel-cache"
-  ".docusaurus"
-  ".pnpm-store"
-  "worktrees"   # `.claude/worktrees` empty placeholder dirs observed in source
 )
 
 
@@ -119,28 +106,24 @@ palette_pair() {
 }
 
 
-# ─── File classification (untracked/ignored → ALLOW/IGNORE/UNKNOWN) ─────────
+# ─── Copy-pattern matching for untracked/ignored files ─────────────────────
 
-classify_basename() {
+should_copy_basename() {
   local name="$1" pat
-  for pat in "${ALLOW_PATTERNS[@]}"; do
-    case "$name" in $pat) printf '%s' "ALLOW"; return ;; esac
+  for pat in "${COPY_PATTERNS[@]}"; do
+    case "$name" in $pat) return 0 ;; esac
   done
-  for pat in "${IGNORE_PATTERNS[@]}"; do
-    case "$name" in $pat) printf '%s' "IGNORE"; return ;; esac
-  done
-  printf '%s' "UNKNOWN"
+  return 1
 }
 
-# Populates two globals: UNCLASSIFIED (relative paths) and ALLOW_LIST (relative
-# paths). Returns 0 iff UNCLASSIFIED is empty.
+# Populates the global COPY_LIST (relative paths) for the given repo.
+# Everything not matching COPY_PATTERNS is silently skipped.
 classify_repo() {
   local repo="$1"
   local src; src=$(source_dir "$repo")
-  local line code path name cls
+  local line code path name
 
-  UNCLASSIFIED=()
-  ALLOW_LIST=()
+  COPY_LIST=()
 
   while IFS= read -r line; do
     code="${line:0:2}"
@@ -148,15 +131,10 @@ classify_repo() {
     path="${line:3}"
     name="${path%/}"
     name="${name##*/}"
-    cls=$(classify_basename "$name")
-    case "$cls" in
-      ALLOW)   ALLOW_LIST+=("$path") ;;
-      IGNORE)  : ;;
-      UNKNOWN) UNCLASSIFIED+=("$repo/$path") ;;
-    esac
+    if should_copy_basename "$name"; then
+      COPY_LIST+=("$path")
+    fi
   done < <(git -C "$src" status --ignored --porcelain 2>/dev/null)
-
-  (( ${#UNCLASSIFIED[@]} == 0 ))
 }
 
 
@@ -322,10 +300,10 @@ setup_one_repo() {
     ln -sfn "$src_gc" "$wt_git/git-crypt"
   fi
 
-  # Copy ALLOW-listed files (re-classify; cheap and avoids stashing state).
+  # Copy COPY_PATTERNS-matching files (re-classify; cheap and stateless).
   classify_repo "$repo"
   local rel
-  for rel in "${ALLOW_LIST[@]}"; do
+  for rel in "${COPY_LIST[@]}"; do
     local from="$src/$rel" to="$wt/$rel"
     [[ -e "$from" ]] || continue
     mkdir -p "$(dirname "$to")"
@@ -382,21 +360,6 @@ cmd_create() {
     err "Branch '$name' is already checked out outside this group:"
     for c in "${conflicts[@]}"; do err "  $c"; done
     die "Switch those worktrees first."
-  fi
-
-  # Pre-flight: classify untracked/ignored across all sources
-  local all_unclassified=() p
-  for repo in "${REPOS[@]}"; do
-    UNCLASSIFIED=(); ALLOW_LIST=()
-    classify_repo "$repo" || true
-    if (( ${#UNCLASSIFIED[@]} > 0 )); then
-      all_unclassified+=("${UNCLASSIFIED[@]}")
-    fi
-  done
-  if (( ${#all_unclassified[@]} > 0 )); then
-    err "Unclassified untracked/ignored paths (add a glob to ALLOW or IGNORE in the script):"
-    for p in "${all_unclassified[@]}"; do err "  $p"; done
-    exit 1
   fi
 
   mkdir -p "$(group_dir "$name")"
