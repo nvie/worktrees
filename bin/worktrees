@@ -500,7 +500,7 @@ cmd_ls() {
       if [[ "$branch" == "HEAD" ]]; then
         off+=("$repo:detached")
       elif [[ "$branch" != "$name" ]]; then
-        off+=("$repo→$branch")
+        off+=("${repo}→${branch}")
       fi
     done
     if (( ${#off[@]} > 0 )); then
