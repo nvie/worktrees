@@ -595,12 +595,12 @@ EOF
 
 main() {
   case "${1:-}" in
-    ""|-h|--help) usage ;;
-    ls)           shift; cmd_ls    "$@" ;;
-    rm)           shift; cmd_rm    "$@" ;;
-    path)         shift; cmd_path  "$@" ;;
-    prune)        shift; cmd_prune "$@" ;;
-    *)            cmd_create "$@" ;;
+    ""|-h|--help)        usage ;;
+    ls|list)             shift; cmd_ls    "$@" ;;
+    rm|remove|delete)    shift; cmd_rm    "$@" ;;
+    path)                shift; cmd_path  "$@" ;;
+    prune)               shift; cmd_prune "$@" ;;
+    *)                   cmd_create "$@" ;;
   esac
 }
 
