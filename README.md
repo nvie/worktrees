@@ -227,18 +227,29 @@ block — so the globs are shell-glob, not regex. Matching is against the
 `<repo>/node_modules` and `<repo>/examples/foo/node_modules`, and `*.log`
 matches any file ending in `.log` regardless of where it sits in the tree.
 
-## Fish setup
+## Installation
 
-One-time per machine. Makes `cd*` aliases, the prompt chip, and the terminal
-tint group-aware — all driven by the env vars from the group's `.envrc`.
+Two one-shot symlinks. No `config.fish` edits.
 
-The tool ships `share/worktrees.fish`. Source it from your `config.fish`:
-
-```fish
-source /path/to/worktrees/share/worktrees.fish
+```sh
+ln -s /Users/nvie/Projects/worktrees/bin/worktrees \
+      ~/bin/worktrees
+ln -s /Users/nvie/Projects/worktrees/share/worktrees.fish \
+      ~/.config/fish/conf.d/worktrees.fish
 ```
 
-The snippet defines three helpers:
+`~/bin` is already on your PATH, so `worktrees` becomes available globally.
+Fish auto-sources every `*.fish` under `~/.config/fish/conf.d/` on shell
+startup, so the snippet loads with no extra config. If you move the project
+repo later, `ln -sf` the same two paths from the new location.
+
+## Fish setup
+
+The `share/worktrees.fish` snippet (auto-loaded via the symlink above) makes
+`cd*` aliases, the prompt chip, and the terminal tint group-aware — all
+driven by the env vars from the group's `.envrc`.
+
+It defines three helpers:
 
 - **`wt_cd <rel-path>`** — routes `cd` to `$WORKTREE_ROOT/<rel>` when in a
   group, `$HOME/Projects/liveblocks/<rel>` otherwise.
