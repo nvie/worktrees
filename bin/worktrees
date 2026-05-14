@@ -273,19 +273,11 @@ setup_claude_config() {
        '{permissions: {additionalDirectories: $dirs}}' > "$settings"
   fi
 
-  # Hide from `git status` via the per-worktree info/exclude (worktree-aware).
-  # Use the directory entry `/.claude/` (anchored to worktree root) — covers
-  # the case where source has no `.claude/` at all (liveblocks.io, zenrouter)
-  # and `git status` would otherwise report the whole dir as `?? .claude/`.
-  # Tracked `.claude/settings.json` in repos that have it is unaffected
-  # (info/exclude only applies to untracked files, same as .gitignore).
-  local wt_git; wt_git=$(git -C "$wt" rev-parse --git-dir)
-  local exclude="$wt_git/info/exclude"
-  mkdir -p "$(dirname "$exclude")"
-  local entry='/.claude/'
-  if [[ ! -f "$exclude" ]] || ! grep -qxF "$entry" "$exclude"; then
-    echo "$entry" >> "$exclude"
-  fi
+  # NOTE: per-worktree git-dir `info/exclude` isn't actually honored — git
+  # reads info/exclude from $GIT_COMMON_DIR (shared with source) regardless.
+  # So for repos whose source has no `.claude/` (liveblocks.io, zenrouter),
+  # `git status` will keep reporting `?? .claude/`. We handle that cosmetic
+  # by filtering it out of `worktrees rm`'s dirty-check (see cmd_rm).
 }
 
 
@@ -555,12 +547,18 @@ cmd_rm() {
   [[ -d "$group" ]] || die "No such group: $name"
 
   # Upfront dirty check across ALL worktrees — abort before touching anything.
+  # Filter out `?? .claude/` (the tool-created Claude config dir in repos
+  # whose source has no `.claude/`). git's info/exclude is shared via
+  # $GIT_COMMON_DIR, so we can't suppress this cosmetically without
+  # affecting the source repo — we just exclude it from the dirty check.
   if (( force == 0 )); then
-    local dirty=() repo wt
+    local dirty=() repo wt porcelain
     for repo in "${REPOS[@]}"; do
       wt="$group/$repo"
       [[ -d "$wt" ]] || continue
-      if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
+      porcelain=$(git -C "$wt" status --porcelain 2>/dev/null \
+        | grep -vE '^\?\? \.claude/$' || true)
+      if [[ -n "$porcelain" ]]; then
         dirty+=("$repo")
       fi
     done
@@ -570,17 +568,16 @@ cmd_rm() {
     fi
   fi
 
+  # Always pass --force to `git worktree remove` itself. Our upfront dirty
+  # check (above) is the real safety gate. git's own --force just bypasses
+  # its complaint about the (tool-managed) `.claude/` dir being untracked.
   local repo wt
   for repo in "${REPOS[@]}"; do
     wt="$group/$repo"
     [[ -d "$wt" ]] || continue
     step "Removing worktree: $repo"
-    if (( force == 1 )); then
-      git -C "$(source_dir "$repo")" worktree remove --force "$wt" 2>/dev/null \
-        || rm -rf "$wt"
-    else
-      git -C "$(source_dir "$repo")" worktree remove "$wt"
-    fi
+    git -C "$(source_dir "$repo")" worktree remove --force "$wt" 2>/dev/null \
+      || rm -rf "$wt"
   done
 
   rm -rf "$group"
