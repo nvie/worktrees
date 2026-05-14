@@ -336,23 +336,6 @@ It defines three helpers and one wrapper:
   `.envrc` loads (and the chip + tint kick in) without a second command.
   Subcommands (`ls`, `rm`, `path`, `prune`) pass through unchanged.
 
-### Refactor your `cd*` aliases
-
-Rewrite each from a hardcoded path to a `wt_cd` call:
-
-```fish
-# Before
-alias cdf 'cd ~/Projects/liveblocks/liveblocks-backend/apps/cloudflare'
-alias cdrc 'cd ~/Projects/liveblocks/liveblocks/packages/liveblocks-react-ui'
-
-# After
-function cdf;  wt_cd 'liveblocks-backend/apps/cloudflare'; end
-function cdrc; wt_cd 'liveblocks/packages/liveblocks-react-ui'; end
-```
-
-~30 mechanical edits in one sitting. The rel-path is now the only varying
-piece — no more typing `~/Projects/liveblocks/` everywhere.
-
 ### Add the chip to your prompt
 
 Drop a call to `wt_prompt_segment` into your `fish_prompt`, wherever you want
