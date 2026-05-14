@@ -298,8 +298,6 @@ setup_one_repo() {
   local src; src=$(source_dir "$repo")
   local wt; wt="$(group_dir "$name")/$repo"
 
-  step "$repo: setting up worktree"
-
   # Branch resolution: reuse if local exists, otherwise create from base.
   if git -C "$src" show-ref --quiet "refs/heads/$name"; then
     git -C "$src" worktree add --no-checkout "$wt" "$name" >/dev/null
@@ -394,13 +392,16 @@ cmd_create() {
 
   mkdir -p "$(group_dir "$name")"
 
-  # Per-repo setup (state-aware)
+  # Per-repo setup. State checks (HEALTHY skip, STALE cleanup, ORPHAN prune)
+  # run synchronously; the actual `setup_one_repo` work goes in parallel.
   local state
+  local pids=() started_repos=() logs=()
   for repo in "${REPOS[@]}"; do
     state=$(worktree_state "$repo" "$name")
     case "$state" in
       HEALTHY)
         step "$repo: already set up — skipping"
+        continue
         ;;
       STALE_DIR_NONEMPTY)
         die "$repo: stale worktree dir at $(group_dir "$name")/$repo (not git-managed, not empty). Wipe it and re-run."
@@ -408,18 +409,36 @@ cmd_create() {
       STALE_DIR_EMPTY)
         step "$repo: cleaning empty stale dir"
         rmdir "$(group_dir "$name")/$repo"
-        setup_one_repo "$repo" "$name" "$base"
         ;;
       ORPHAN_ADMIN)
         step "$repo: pruning orphaned admin entry"
         git -C "$(source_dir "$repo")" worktree prune >/dev/null
-        setup_one_repo "$repo" "$name" "$base"
         ;;
-      NEEDED)
-        setup_one_repo "$repo" "$name" "$base"
-        ;;
+      NEEDED) : ;;
     esac
+
+    local log; log=$(mktemp)
+    logs+=("$log")
+    started_repos+=("$repo")
+    (setup_one_repo "$repo" "$name" "$base" >"$log" 2>&1) &
+    pids+=($!)
   done
+
+  if (( ${#pids[@]} > 0 )); then
+    step "Setting up worktrees in parallel: ${started_repos[*]}"
+    local i any_failed=0
+    for i in "${!pids[@]}"; do
+      if wait "${pids[$i]}"; then
+        ok "${started_repos[$i]}"
+      else
+        err "${started_repos[$i]} failed:"
+        cat "${logs[$i]}" >&2
+        any_failed=1
+      fi
+      rm -f "${logs[$i]}"
+    done
+    (( any_failed == 1 )) && die "One or more worktrees failed to set up. \`rm -rf $(group_dir "$name")\` and re-run."
+  fi
 
   write_envrc_if_missing "$name"
   write_claude_md_if_missing "$name"
