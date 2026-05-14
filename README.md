@@ -398,6 +398,11 @@ worktrees prune      # `git worktree prune` in every source repo
 worktrees path <name> # print the group's path (for `cd (worktrees path foo)`)
 ```
 
+`ls` prints one group name per line, alphabetical. No path, no status, no
+header — pipe-friendly for `fzf`, `xargs`, `head`. A richer view is what the
+future TUI (Roadmap) is for; for now `--long` doesn't exist (add when
+needed).
+
 `rm` first checks **all** worktrees in the group for uncommitted changes and
 bails out before touching anything if any are dirty. Only once the whole
 group is verified clean does it run `git worktree remove` per repo and
