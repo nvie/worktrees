@@ -267,10 +267,15 @@ setup_claude_config() {
   fi
 
   # Hide from `git status` via the per-worktree info/exclude (worktree-aware).
+  # Use the directory entry `/.claude/` (anchored to worktree root) — covers
+  # the case where source has no `.claude/` at all (liveblocks.io, zenrouter)
+  # and `git status` would otherwise report the whole dir as `?? .claude/`.
+  # Tracked `.claude/settings.json` in repos that have it is unaffected
+  # (info/exclude only applies to untracked files, same as .gitignore).
   local wt_git; wt_git=$(git -C "$wt" rev-parse --git-dir)
   local exclude="$wt_git/info/exclude"
   mkdir -p "$(dirname "$exclude")"
-  local entry='.claude/settings.local.json'
+  local entry='/.claude/'
   if [[ ! -f "$exclude" ]] || ! grep -qxF "$entry" "$exclude"; then
     echo "$entry" >> "$exclude"
   fi
