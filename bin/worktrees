@@ -1,0 +1,590 @@
+#!/usr/bin/env bash
+#
+# worktrees — coordinated multi-repo git worktrees
+# https://github.com/nvie/worktrees
+
+set -euo pipefail
+
+
+# ─── Configuration ──────────────────────────────────────────────────────────
+
+WORKTREE_ROOT="${WORKTREE_ROOT:-$HOME/Desktop/worktrees}"
+SOURCE_ROOT="${SOURCE_ROOT:-$HOME/Projects/liveblocks}"
+DEFAULT_BASE="${DEFAULT_BASE:-origin/main}"
+
+# Repos to include in every group. Order is preserved in output.
+REPOS=(
+  liveblocks
+  liveblocks-backend
+  admin
+  liveblocks.io
+  zenrouter
+)
+
+# Subdir patterns to prepend to CDPATH, mirroring the user's global CDPATH so
+# `cd <something>` from inside a group resolves to this group's worktree first.
+CDPATH_SUBDIRS=(
+  "liveblocks/packages"
+  "liveblocks/tools"
+  "liveblocks/schema-lang"
+  "liveblocks-backend/apps"
+  "liveblocks-backend/shared"
+  "liveblocks-backend/tools"
+  "liveblocks"
+  "liveblocks-backend"
+  "admin"
+  "liveblocks.io"
+  "zenrouter"
+)
+
+# 8-entry palette: "fg-ansi-index|bg-hex"
+# A hash of the group name picks one; same name always lands on the same entry.
+PALETTE=(
+  "147|#1a0d2e"   # purple
+  "117|#0d1a2e"   # blue
+  "108|#0d1f0d"   # green
+  "180|#1f1a0d"   # brown
+  "210|#2e0d1a"   # plum
+  "186|#1f1f0d"   # olive
+  "144|#2e1f0d"   # amber
+  "151|#0d2e1a"   # teal
+)
+
+# ALLOW: copied from source to worktree (basename glob match)
+# IGNORE: not copied (basename glob match)
+# Anything matching neither aborts the create with a clear list of paths.
+ALLOW_PATTERNS=(
+  ".env"
+  ".env.*"
+  "settings.local.json"
+)
+IGNORE_PATTERNS=(
+  "node_modules"
+  ".next"
+  "dist"
+  "build"
+  ".turbo"
+  ".cache"
+  "coverage"
+  "*.log"
+  ".nyc_output"
+  ".parcel-cache"
+  ".docusaurus"
+  ".pnpm-store"
+  "worktrees"   # `.claude/worktrees` empty placeholder dirs observed in source
+)
+
+
+# ─── UI helpers ─────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+  C_DIM=$'\e[2m'
+  C_RED=$'\e[31m'; C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'
+  C_RESET=$'\e[0m'
+else
+  C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_RESET=""
+fi
+
+info() { printf '%s\n' "$*"; }
+step() { printf '%s→%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
+ok()   { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%swarning:%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err()  { printf '%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+
+# ─── Path helpers ───────────────────────────────────────────────────────────
+
+group_dir()  { printf '%s/%s' "$WORKTREE_ROOT" "$1"; }
+source_dir() { printf '%s/%s' "$SOURCE_ROOT"   "$1"; }
+
+# Resolve the script's own dir, following symlinks (~/bin/worktrees → repo)
+script_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local tgt; tgt=$(readlink "$src")
+    [[ "$tgt" = /* ]] && src="$tgt" || src="$(cd "$(dirname "$src")" && pwd)/$tgt"
+  done
+  cd "$(dirname "$src")" && pwd
+}
+share_dir() { printf '%s/../share' "$(script_dir)"; }
+
+
+# ─── Color picker ───────────────────────────────────────────────────────────
+
+palette_pair() {
+  local hex; hex=$(printf '%s' "$1" | md5sum | head -c 2)
+  local idx=$(( 16#$hex % ${#PALETTE[@]} ))
+  printf '%s' "${PALETTE[$idx]}"
+}
+
+
+# ─── File classification (untracked/ignored → ALLOW/IGNORE/UNKNOWN) ─────────
+
+classify_basename() {
+  local name="$1" pat
+  for pat in "${ALLOW_PATTERNS[@]}"; do
+    case "$name" in $pat) printf '%s' "ALLOW"; return ;; esac
+  done
+  for pat in "${IGNORE_PATTERNS[@]}"; do
+    case "$name" in $pat) printf '%s' "IGNORE"; return ;; esac
+  done
+  printf '%s' "UNKNOWN"
+}
+
+# Populates two globals: UNCLASSIFIED (relative paths) and ALLOW_LIST (relative
+# paths). Returns 0 iff UNCLASSIFIED is empty.
+classify_repo() {
+  local repo="$1"
+  local src; src=$(source_dir "$repo")
+  local line code path name cls
+
+  UNCLASSIFIED=()
+  ALLOW_LIST=()
+
+  while IFS= read -r line; do
+    code="${line:0:2}"
+    [[ "$code" == "??" || "$code" == "!!" ]] || continue
+    path="${line:3}"
+    name="${path%/}"
+    name="${name##*/}"
+    cls=$(classify_basename "$name")
+    case "$cls" in
+      ALLOW)   ALLOW_LIST+=("$path") ;;
+      IGNORE)  : ;;
+      UNKNOWN) UNCLASSIFIED+=("$repo/$path") ;;
+    esac
+  done < <(git -C "$src" status --ignored --porcelain 2>/dev/null)
+
+  (( ${#UNCLASSIFIED[@]} == 0 ))
+}
+
+
+# ─── Worktree state detection (Q1) ──────────────────────────────────────────
+
+# Possible states for a given repo's worktree-for-this-group:
+#   HEALTHY              dir exists AND git knows about it → skip
+#   NEEDED               neither → create
+#   STALE_DIR_EMPTY      dir exists but git doesn't, dir is empty → clean + create
+#   STALE_DIR_NONEMPTY   dir exists but git doesn't, dir not empty → abort
+#   ORPHAN_ADMIN         git knows but dir gone → prune + create
+worktree_state() {
+  local repo="$1" name="$2"
+  local src; src=$(source_dir "$repo")
+  local wt; wt="$(group_dir "$name")/$repo"
+
+  local known=0 has_dir=0
+  if git -C "$src" worktree list --porcelain 2>/dev/null \
+       | grep -qx "worktree $wt"; then
+    known=1
+  fi
+  [[ -d "$wt" ]] && has_dir=1
+
+  if (( has_dir == 1 && known == 1 )); then printf '%s' "HEALTHY"
+  elif (( has_dir == 0 && known == 0 )); then printf '%s' "NEEDED"
+  elif (( has_dir == 1 && known == 0 )); then
+    if [[ -z "$(ls -A "$wt" 2>/dev/null)" ]]; then printf '%s' "STALE_DIR_EMPTY"
+    else printf '%s' "STALE_DIR_NONEMPTY"; fi
+  else printf '%s' "ORPHAN_ADMIN"
+  fi
+}
+
+# Returns 0 + prints conflicting path(s) if branch <name> is checked out in a
+# worktree of <repo> that is NOT our group's intended worktree. Returns 1 (clear)
+# otherwise.
+branch_conflict_outside_group() {
+  local repo="$1" name="$2"
+  local src; src=$(source_dir "$repo")
+  local ours; ours="$(group_dir "$name")/$repo"
+
+  local out
+  out=$(git -C "$src" worktree list --porcelain 2>/dev/null \
+    | awk -v branch="refs/heads/$name" -v ours="$ours" '
+        /^worktree / { path=$2; br=""; next }
+        /^branch /   { br=$2 }
+        /^$/         {
+          if (br == branch && path != ours) print path
+          path=""; br=""
+        }
+        END {
+          if (br == branch && path != ours) print path
+        }
+      ')
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
+
+
+# ─── .envrc / CLAUDE.md generation (write-once) ─────────────────────────────
+
+write_envrc_if_missing() {
+  local name="$1"
+  local target; target="$(group_dir "$name")/.envrc"
+  [[ -f "$target" ]] && return 0
+
+  local pair; pair=$(palette_pair "$name")
+  local fg="${pair%%|*}" bg="${pair##*|}"
+  local today; today=$(date +%Y-%m-%d)
+
+  {
+    echo "# Generated by \`worktrees $name\` on $today. Edit freely — re-runs leave this file alone. To refresh from template: \`rm .envrc && worktrees $name\`."
+    echo ""
+    echo "export WORKTREE_GROUP=\"$name\""
+    echo "export WORKTREE_ROOT=\"\$PWD\""
+    echo "export WORKTREE_COLOR_FG=\"$fg\""
+    echo "export WORKTREE_COLOR_BG=\"$bg\""
+    echo ""
+    echo "# Subdir patterns hardcoded in the script (mirrors your global CDPATH)."
+    local sub
+    for sub in "${CDPATH_SUBDIRS[@]}"; do
+      echo "path_add CDPATH \"\$PWD/$sub\""
+    done
+  } > "$target"
+}
+
+write_claude_md_if_missing() {
+  local name="$1"
+  local target; target="$(group_dir "$name")/CLAUDE.md"
+  [[ -f "$target" ]] && return 0
+
+  local template="$(share_dir)/CLAUDE.md.template"
+  [[ -f "$template" ]] || die "Template missing: $template"
+
+  local today; today=$(date +%Y-%m-%d)
+  sed -e "s|{{name}}|$name|g" -e "s|{{date}}|$today|g" "$template" > "$target"
+}
+
+
+# ─── Claude per-worktree config ─────────────────────────────────────────────
+
+# Build a JSON array of paths to the four sibling worktrees of $repo.
+siblings_json_array() {
+  local repo="$1" name="$2"
+  local group; group=$(group_dir "$name")
+  local siblings=() r
+  for r in "${REPOS[@]}"; do
+    [[ "$r" == "$repo" ]] && continue
+    siblings+=("$group/$r")
+  done
+  printf '%s\n' "${siblings[@]}" | jq -R . | jq -s .
+}
+
+setup_claude_config() {
+  local repo="$1" name="$2"
+  local wt; wt="$(group_dir "$name")/$repo"
+  local settings="$wt/.claude/settings.local.json"
+
+  mkdir -p "$wt/.claude"
+
+  local dirs; dirs=$(siblings_json_array "$repo" "$name")
+
+  if [[ -f "$settings" ]]; then
+    local tmp; tmp=$(mktemp)
+    jq --argjson dirs "$dirs" \
+       '(.permissions //= {}) | .permissions.additionalDirectories = $dirs' \
+       "$settings" > "$tmp" && mv "$tmp" "$settings"
+  else
+    jq -n --argjson dirs "$dirs" \
+       '{permissions: {additionalDirectories: $dirs}}' > "$settings"
+  fi
+
+  # Hide from `git status` via the per-worktree info/exclude (worktree-aware).
+  local wt_git; wt_git=$(git -C "$wt" rev-parse --git-dir)
+  local exclude="$wt_git/info/exclude"
+  mkdir -p "$(dirname "$exclude")"
+  local entry='.claude/settings.local.json'
+  if [[ ! -f "$exclude" ]] || ! grep -qxF "$entry" "$exclude"; then
+    echo "$entry" >> "$exclude"
+  fi
+}
+
+
+# ─── Per-repo worktree setup ────────────────────────────────────────────────
+
+setup_one_repo() {
+  local repo="$1" name="$2" base="$3"
+  local src; src=$(source_dir "$repo")
+  local wt; wt="$(group_dir "$name")/$repo"
+
+  step "$repo: setting up worktree"
+
+  # Branch resolution: reuse if local exists, otherwise create from base.
+  if git -C "$src" show-ref --quiet "refs/heads/$name"; then
+    git -C "$src" worktree add --no-checkout "$wt" "$name" >/dev/null
+  else
+    git -C "$src" worktree add --no-checkout -b "$name" "$wt" "$base" >/dev/null
+  fi
+
+  # Symlink git-crypt key dir from source so smudge filters work on checkout.
+  local src_gc="$src/.git/git-crypt"
+  if [[ -d "$src_gc" ]]; then
+    local wt_git; wt_git=$(git -C "$wt" rev-parse --git-dir)
+    ln -sfn "$src_gc" "$wt_git/git-crypt"
+  fi
+
+  # Copy ALLOW-listed files (re-classify; cheap and avoids stashing state).
+  classify_repo "$repo"
+  local rel
+  for rel in "${ALLOW_LIST[@]}"; do
+    local from="$src/$rel" to="$wt/$rel"
+    [[ -e "$from" ]] || continue
+    mkdir -p "$(dirname "$to")"
+    cp -a "$from" "$to"
+  done
+
+  # Materialize the working tree (smudge filters run; git-crypt decrypts).
+  git -C "$wt" checkout HEAD -- . 2>/dev/null || true
+
+  # Claude config + info/exclude
+  setup_claude_config "$repo" "$name"
+}
+
+
+# ─── Subcommand: create ─────────────────────────────────────────────────────
+
+cmd_create() {
+  local name="${1:-}"
+  local base="${2:-$DEFAULT_BASE}"
+  [[ -n "$name" ]] || die "Usage: worktrees <name> [<base-branch>]"
+
+  # Pre-flight: source repos exist
+  local repo
+  for repo in "${REPOS[@]}"; do
+    [[ -d "$(source_dir "$repo")/.git" ]] \
+      || die "Source repo missing: $(source_dir "$repo")"
+  done
+
+  # Pre-flight: fetch in each source
+  step "Fetching: ${REPOS[*]}"
+  for repo in "${REPOS[@]}"; do
+    git -C "$(source_dir "$repo")" fetch --quiet
+  done
+
+  # Pre-flight: base exists everywhere
+  local missing=()
+  for repo in "${REPOS[@]}"; do
+    if ! git -C "$(source_dir "$repo")" rev-parse --verify --quiet "$base" >/dev/null; then
+      missing+=("$repo")
+    fi
+  done
+  if (( ${#missing[@]} > 0 )); then
+    die "Base '$base' missing in: ${missing[*]}. Pick a different base or create the branches first."
+  fi
+
+  # Pre-flight: branch <name> not checked out OUTSIDE this group
+  local conflicts=() other c
+  for repo in "${REPOS[@]}"; do
+    if other=$(branch_conflict_outside_group "$repo" "$name"); then
+      conflicts+=("$repo: $other")
+    fi
+  done
+  if (( ${#conflicts[@]} > 0 )); then
+    err "Branch '$name' is already checked out outside this group:"
+    for c in "${conflicts[@]}"; do err "  $c"; done
+    die "Switch those worktrees first."
+  fi
+
+  # Pre-flight: classify untracked/ignored across all sources
+  local all_unclassified=() p
+  for repo in "${REPOS[@]}"; do
+    UNCLASSIFIED=(); ALLOW_LIST=()
+    classify_repo "$repo" || true
+    if (( ${#UNCLASSIFIED[@]} > 0 )); then
+      all_unclassified+=("${UNCLASSIFIED[@]}")
+    fi
+  done
+  if (( ${#all_unclassified[@]} > 0 )); then
+    err "Unclassified untracked/ignored paths (add a glob to ALLOW or IGNORE in the script):"
+    for p in "${all_unclassified[@]}"; do err "  $p"; done
+    exit 1
+  fi
+
+  mkdir -p "$(group_dir "$name")"
+
+  # Per-repo setup (state-aware)
+  local state
+  for repo in "${REPOS[@]}"; do
+    state=$(worktree_state "$repo" "$name")
+    case "$state" in
+      HEALTHY)
+        step "$repo: already set up — skipping"
+        ;;
+      STALE_DIR_NONEMPTY)
+        die "$repo: stale worktree dir at $(group_dir "$name")/$repo (not git-managed, not empty). Wipe it and re-run."
+        ;;
+      STALE_DIR_EMPTY)
+        step "$repo: cleaning empty stale dir"
+        rmdir "$(group_dir "$name")/$repo"
+        setup_one_repo "$repo" "$name" "$base"
+        ;;
+      ORPHAN_ADMIN)
+        step "$repo: pruning orphaned admin entry"
+        git -C "$(source_dir "$repo")" worktree prune >/dev/null
+        setup_one_repo "$repo" "$name" "$base"
+        ;;
+      NEEDED)
+        setup_one_repo "$repo" "$name" "$base"
+        ;;
+    esac
+  done
+
+  write_envrc_if_missing "$name"
+  write_claude_md_if_missing "$name"
+
+  ok "Created: $(group_dir "$name")"
+  info ""
+  info "Next:"
+  info "  cd $(group_dir "$name")"
+  info "  direnv allow"
+}
+
+
+# ─── Subcommand: ls ─────────────────────────────────────────────────────────
+
+cmd_ls() {
+  [[ -d "$WORKTREE_ROOT" ]] || return 0
+
+  local groups=() d
+  while IFS= read -r d; do
+    groups+=("$(basename "$d")")
+  done < <(find "$WORKTREE_ROOT" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort)
+
+  # Emit stderr warnings for off-branch worktrees, stdout for the names.
+  local name repo head content branch off
+  for name in "${groups[@]}"; do
+    off=()
+    for repo in "${REPOS[@]}"; do
+      [[ -d "$(group_dir "$name")/$repo" ]] || continue
+      head="$(source_dir "$repo")/.git/worktrees/$name/HEAD"
+      if [[ ! -f "$head" ]]; then
+        off+=("$repo:no-HEAD"); continue
+      fi
+      content=$(<"$head")
+      if [[ "$content" == ref:* ]]; then
+        branch="${content##*/}"
+      else
+        off+=("$repo:detached"); continue
+      fi
+      [[ "$branch" == "$name" ]] || off+=("$repo→$branch")
+    done
+    if (( ${#off[@]} > 0 )); then
+      warn "$name: ${#off[@]} of ${#REPOS[@]} worktrees off-branch (${off[*]})"
+    fi
+  done
+
+  (( ${#groups[@]} > 0 )) && printf '%s\n' "${groups[@]}"
+}
+
+
+# ─── Subcommand: path ───────────────────────────────────────────────────────
+
+cmd_path() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "Usage: worktrees path <name>"
+  local group; group=$(group_dir "$name")
+  [[ -d "$group" ]] || die "No such group: $name"
+  printf '%s\n' "$group"
+}
+
+
+# ─── Subcommand: prune ──────────────────────────────────────────────────────
+
+cmd_prune() {
+  local repo
+  for repo in "${REPOS[@]}"; do
+    info "=== $repo ==="
+    git -C "$(source_dir "$repo")" worktree prune -v 2>&1 || true
+  done
+}
+
+
+# ─── Subcommand: rm ─────────────────────────────────────────────────────────
+
+cmd_rm() {
+  local name="" force=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --force) force=1 ;;
+      -*) die "Unknown flag: $1" ;;
+      *) [[ -z "$name" ]] && name="$1" \
+           || die "Usage: worktrees rm <name> [--force]" ;;
+    esac
+    shift
+  done
+  [[ -n "$name" ]] || die "Usage: worktrees rm <name> [--force]"
+
+  local group; group=$(group_dir "$name")
+  [[ -d "$group" ]] || die "No such group: $name"
+
+  # Upfront dirty check across ALL worktrees — abort before touching anything.
+  if (( force == 0 )); then
+    local dirty=() repo wt
+    for repo in "${REPOS[@]}"; do
+      wt="$group/$repo"
+      [[ -d "$wt" ]] || continue
+      if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
+        dirty+=("$repo")
+      fi
+    done
+    if (( ${#dirty[@]} > 0 )); then
+      err "Uncommitted changes in: ${dirty[*]}"
+      die "Refusing to remove. Use --force to override."
+    fi
+  fi
+
+  local repo wt
+  for repo in "${REPOS[@]}"; do
+    wt="$group/$repo"
+    [[ -d "$wt" ]] || continue
+    step "Removing worktree: $repo"
+    if (( force == 1 )); then
+      git -C "$(source_dir "$repo")" worktree remove --force "$wt" 2>/dev/null \
+        || rm -rf "$wt"
+    else
+      git -C "$(source_dir "$repo")" worktree remove "$wt"
+    fi
+  done
+
+  rm -rf "$group"
+
+  # Safety-net prune (catches any admin debris from --force / rm -rf fallback).
+  for repo in "${REPOS[@]}"; do
+    git -C "$(source_dir "$repo")" worktree prune >/dev/null 2>&1 || true
+  done
+
+  ok "Removed: $name"
+}
+
+
+# ─── Entrypoint ─────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<EOF
+Coordinated multi-repo git worktrees
+
+Usage:
+  worktrees <name> [<base-branch>]   Create a worktree group
+  worktrees ls                       List existing groups
+  worktrees rm <name> [--force]      Remove a group
+  worktrees prune                    Sync source repos after manual cleanup
+  worktrees path <name>              Print a group's path
+
+${C_DIM}Environment:
+  WORKTREE_ROOT   (default: \$HOME/Desktop/worktrees)
+  SOURCE_ROOT     (default: \$HOME/Projects/liveblocks)
+  DEFAULT_BASE    (default: origin/main)${C_RESET}
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    ""|-h|--help) usage ;;
+    ls)           shift; cmd_ls    "$@" ;;
+    rm)           shift; cmd_rm    "$@" ;;
+    path)         shift; cmd_path  "$@" ;;
+    prune)        shift; cmd_prune "$@" ;;
+    *)            cmd_create "$@" ;;
+  esac
+}
+
+main "$@"
