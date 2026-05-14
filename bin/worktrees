@@ -35,17 +35,17 @@ CDPATH_SUBDIRS=(
   "liveblocks-backend/tools"
 )
 
-# 8-entry palette: "fg-ansi-index|bg-hex"
+# 8-entry palette of subtle dark backgrounds, one per OSC 11 terminal tint.
 # A hash of the group name picks one; same name always lands on the same entry.
 PALETTE=(
-  "147|#1a0d2e"   # purple
-  "117|#0d1a2e"   # blue
-  "108|#0d1f0d"   # green
-  "180|#1f1a0d"   # brown
-  "210|#2e0d1a"   # plum
-  "186|#1f1f0d"   # olive
-  "144|#2e1f0d"   # amber
-  "151|#0d2e1a"   # teal
+  "#1a0d2e"   # purple
+  "#0d1a2e"   # blue
+  "#0d1f0d"   # green
+  "#1f1a0d"   # brown
+  "#2e0d1a"   # plum
+  "#1f1f0d"   # olive
+  "#2e1f0d"   # amber
+  "#0d2e1a"   # teal
 )
 
 # Untracked/ignored files that should still travel into each worktree.
@@ -107,7 +107,7 @@ direnv_path_allowed() {
 
 # ─── Color picker ───────────────────────────────────────────────────────────
 
-palette_pair() {
+palette_bg() {
   local hex; hex=$(printf '%s' "$1" | md5sum | head -c 2)
   local idx=$(( 16#$hex % ${#PALETTE[@]} ))
   printf '%s' "${PALETTE[$idx]}"
@@ -208,8 +208,7 @@ write_envrc_if_missing() {
   local target; target="$(group_dir "$name")/.envrc"
   [[ -f "$target" ]] && return 0
 
-  local pair; pair=$(palette_pair "$name")
-  local fg="${pair%%|*}" bg="${pair##*|}"
+  local bg; bg=$(palette_bg "$name")
   local today; today=$(date +%Y-%m-%d)
 
   {
@@ -217,8 +216,7 @@ write_envrc_if_missing() {
     echo ""
     echo "export WORKTREE_GROUP=\"$name\""
     echo "export WORKTREE_ROOT=\"\$PWD\""
-    echo "export WORKTREE_COLOR_FG=\"$fg\""
-    echo "export WORKTREE_COLOR_BG=\"$bg\""
+    echo "export WORKTREE_COLOR_BG=\"$bg\"   # OSC 11 terminal tint; hashed from name"
     echo ""
     echo "# Group root + a few container subdirs (mirrors your global CDPATH)."
     echo "path_add CDPATH \"\$PWD\""

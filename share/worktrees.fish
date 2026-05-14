@@ -3,8 +3,7 @@
 # Drives behavior when a group's .envrc is loaded:
 #   $WORKTREE_GROUP     set → in a group
 #   $WORKTREE_ROOT      group dir
-#   $WORKTREE_COLOR_FG  ANSI 256 index
-#   $WORKTREE_COLOR_BG  hex (#RRGGBB)
+#   $WORKTREE_COLOR_BG  hex (#RRGGBB) for OSC 11 terminal tint
 
 
 # ─── wt_cd: group-aware cd helper ──────────────────────────────────────────
@@ -21,19 +20,6 @@ function wt_cd --argument-names rel
     else
         cd "$HOME/Projects/liveblocks/$rel"
     end
-end
-
-
-# ─── wt_prompt_segment: chip for fish_prompt ───────────────────────────────
-#
-# Call from your fish_prompt to render `[group-name] ` colored by the
-# group's foreground color. Outputs nothing when not in a group.
-
-function wt_prompt_segment
-    set -q WORKTREE_GROUP; or return
-    set_color $WORKTREE_COLOR_FG
-    printf ' [%s]' "$WORKTREE_GROUP"
-    set_color normal
 end
 
 

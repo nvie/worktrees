@@ -157,8 +157,7 @@ context and prepends each repo to `CDPATH`:
 
 export WORKTREE_GROUP="feature-xyz"
 export WORKTREE_ROOT="$PWD"
-export WORKTREE_COLOR_FG="208"        # ANSI index, hashed from name
-export WORKTREE_COLOR_BG="#1a0d2e"    # hex, hashed from name
+export WORKTREE_COLOR_BG="#1a0d2e"    # OSC 11 terminal tint; hashed from name
 
 # Group root + a few container subdirs (mirrors your global CDPATH).
 path_add CDPATH "$PWD"
@@ -296,7 +295,7 @@ Each path is normalized (strip the `?? ` / `!! ` prefix, strip any trailing
 the **basename only**, so a single `.env.*` entry catches `.env.local`
 anywhere in the tree.
 
-If you discover a file type that *should* travel and currently isn't, add
+If you discover a file type that _should_ travel and currently isn't, add
 a glob to `COPY_PATTERNS` at the top of the script.
 
 ## Installation
@@ -321,31 +320,41 @@ The `share/worktrees.fish` snippet (auto-loaded via the symlink above) makes
 `cd*` aliases, the prompt chip, and the terminal tint group-aware — all
 driven by the env vars from the group's `.envrc`.
 
-It defines three helpers and one wrapper:
+It defines two helpers and one wrapper:
 
 - **`wt_cd <rel-path>`** — routes `cd` to `$WORKTREE_ROOT/<rel>` when in a
   group, `$HOME/Projects/liveblocks/<rel>` otherwise.
-- **`wt_prompt_segment`** — emits `[feature-xyz]` colored by
-  `$WORKTREE_COLOR_FG` when in a group; outputs nothing otherwise. You call
-  it from your `fish_prompt`.
 - **`--on-variable WORKTREE_GROUP` handler** — emits OSC 11 with
   `$WORKTREE_COLOR_BG` to tint the terminal background when the group sets,
   emits the OSC 11 reset (`\e]111\a`) when it unsets.
 - **`worktrees` function wrapper** — after `worktrees tmp2` finishes
   successfully, automatically `cd`s you into the new group dir so the
-  `.envrc` loads (and the chip + tint kick in) without a second command.
+  `.envrc` loads (and the tint kicks in) without a second command.
   Subcommands (`ls`, `rm`, `path`, `prune`) pass through unchanged.
 
-### Add the chip to your prompt
+### Show the group in your prompt
 
-Drop a call to `wt_prompt_segment` into your `fish_prompt`, wherever you want
-the `[group-name]` chip to appear (typically right after the cwd):
+When inside a worktree, render `[worktree:<name>]` + the path within the
+current repo. Customize `fish_prompt` in your `config.fish` along these
+lines:
 
 ```fish
-function fish_prompt
-  # … cwd, git status, etc. …
-  wt_prompt_segment
-  # … rest of prompt …
+if set -q WORKTREE_GROUP; and string match -q "$WORKTREE_ROOT/*" "$PWD"
+    set -l rel (string replace -- "$WORKTREE_ROOT/" '' "$PWD")
+    set -l display
+    if string match -q '*/*' "$rel"
+        set display (string replace -r '^[^/]+/' '' "$rel")
+    else
+        set display "$rel"
+    end
+    set_color bryellow
+    printf '[worktree:%s]' "$WORKTREE_GROUP"
+    set_color normal
+    set_color $fish_color_cwd
+    printf ' %s' "$display"
+    set_color normal
+else
+    # … your usual cwd + git_prompt …
 end
 ```
 
@@ -354,18 +363,19 @@ end
 What you get once the fish snippet is sourced and the group's `.envrc` is
 loaded:
 
-- **Prompt chip** — `[feature-xyz]` rendered in the group's color (stable
-  across sessions, hashed from the name) by `wt_prompt_segment`.
+- **Prompt** — `[worktree:<name>]` (bright yellow) followed by the path
+  within the current repo, when you're inside one of the group's worktrees.
+  Outside a worktree (or at the group root): your normal prompt.
 - **Terminal background** — a subtle dark tint via OSC 11
   (`\e]11;#RRGGBB\a`), reset on direnv unload.
 
-Each group's color is picked from a palette via a hash of its name, so
-`feature-xyz` always looks the same. **Don't like the color picked?** Edit
-`$WORKTREE_COLOR_FG` and `$WORKTREE_COLOR_BG` in the group's `.envrc` —
-the tool won't touch it on idempotent re-runs (see [What it does](#what-it-does)
-step 7). The OSC 11 tint is still subject to a Ghostty smoke test that
+Each group's background color is picked from a palette via a hash of its
+name, so `feature-xyz` always looks the same. **Don't like the color
+picked?** Edit `$WORKTREE_COLOR_BG` in the group's `.envrc` — the tool
+won't touch it on idempotent re-runs (see [What it does](#what-it-does)
+step 6). The OSC 11 tint is still subject to a Ghostty smoke test that
 hasn't happened yet — if it misbehaves, the snippet's `--on-variable`
-handler is the one place to disable it without losing the chip.
+handler is the one place to disable it without losing the prompt label.
 
 ## Other commands
 
@@ -448,27 +458,29 @@ Defaults live at the top of the script. Likely things to tweak:
 - `SOURCE_ROOT` — default `~/Projects/liveblocks`
 - `REPOS` — the list of repo dir names to include
 - `DEFAULT_BASE` — default `origin/main`
-- `PALETTE` — 8 `(fg-ansi-index, bg-hex)` pairs. A deterministic hash of the
-  group name picks one and is exported as `$WORKTREE_COLOR_FG` /
-  `$WORKTREE_COLOR_BG` in the group's `.envrc`. The fish snippet renders the
-  chip and the OSC 11 tint from those. Default palette:
+- `PALETTE` — 8 dark background hex values for the OSC 11 terminal tint. A
+  deterministic hash of the group name picks one and is exported as
+  `$WORKTREE_COLOR_BG` in the group's `.envrc`. The fish snippet renders
+  the tint from that. Default palette:
 
   ```bash
   PALETTE=(
-    "147|#1a0d2e"   # purple
-    "117|#0d1a2e"   # blue
-    "108|#0d1f0d"   # green
-    "180|#1f1a0d"   # brown
-    "210|#2e0d1a"   # plum
-    "186|#1f1f0d"   # olive
-    "144|#2e1f0d"   # amber
-    "151|#0d2e1a"   # teal
+    "#1a0d2e"   # purple
+    "#0d1a2e"   # blue
+    "#0d1f0d"   # green
+    "#1f1a0d"   # brown
+    "#2e0d1a"   # plum
+    "#1f1f0d"   # olive
+    "#2e1f0d"   # amber
+    "#0d2e1a"   # teal
   )
   ```
 
   Hash: `printf '%s' "$name" | md5sum | head -c 2` → hex byte → mod 8 → index.
-  Same name always picks the same entry. To override per-group, edit the
-  group's `.envrc` (see [Visual markers](#visual-markers)).
+  Same name always picks the same entry. To override per-group, edit
+  `$WORKTREE_COLOR_BG` in the group's `.envrc` (see
+  [Visual markers](#visual-markers)). The prompt label `[worktree:…]` is
+  hardcoded bright yellow regardless.
 
 ## Requirements
 
