@@ -38,14 +38,14 @@ CDPATH_SUBDIRS=(
 # 8-entry palette of subtle dark backgrounds, one per OSC 11 terminal tint.
 # A hash of the group name picks one; same name always lands on the same entry.
 PALETTE=(
-  "#1a0d2e"   # purple
-  "#0d1a2e"   # blue
-  "#0d1f0d"   # green
-  "#1f1a0d"   # brown
-  "#2e0d1a"   # plum
-  "#1f1f0d"   # olive
-  "#2e1f0d"   # amber
-  "#0d2e1a"   # teal
+  "#1a0d2e purple"
+  "#0d1a2e blue"
+  "#0d1f0d green"
+  "#1f1a0d brown"
+  "#2e0d1a plum"
+  "#1f1f0d olive"
+  "#2e1f0d amber"
+  "#0d2e1a teal"
 )
 
 # Untracked/ignored files that should still travel into each worktree.
@@ -110,7 +110,7 @@ direnv_path_allowed() {
 palette_bg() {
   local hex; hex=$(printf '%s' "$1" | md5sum | head -c 2)
   local idx=$(( 16#$hex % ${#PALETTE[@]} ))
-  printf '%s' "${PALETTE[$idx]}"
+  printf '%s' "${PALETTE[$idx]%% *}"
 }
 
 
@@ -216,6 +216,12 @@ write_envrc_if_missing() {
     echo ""
     echo "export WORKTREE_GROUP=\"$name\""
     echo "export WORKTREE_ROOT=\"\$PWD\""
+    local entry hex color_name
+    for entry in "${PALETTE[@]}"; do
+      hex="${entry%% *}"
+      color_name="${entry#* }"
+      echo "#export WORKTREE_COLOR_BG=\"$hex\"   # $color_name"
+    done
     echo "export WORKTREE_COLOR_BG=\"$bg\"   # OSC 11 terminal tint; hashed from name"
     echo ""
     echo "# Group root + a few container subdirs (mirrors your global CDPATH)."
