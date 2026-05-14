@@ -436,7 +436,23 @@ A `--force-delete-branch` flag may land later. For now, keeping branches is
 the conservative default.
 
 `prune` is the escape hatch for "I deleted a group's directory by hand and
-now my source repos think the worktrees still exist." It runs `git worktree prune` in every repo listed in `REPOS`. Like `rm`, it leaves branches alone.
+now my source repos think the worktrees still exist." It runs
+`git worktree prune -v` in every repo listed in `REPOS` and pipes git's
+output through unchanged — no parsing, no per-feature scoping, no prettier
+formatting. Each repo's section is prefixed with a one-line header so you
+can tell which output came from which:
+
+```
+$ worktrees prune
+=== liveblocks ===
+=== liveblocks-backend ===
+Removing worktrees/feature-xyz: gitdir file points to non-existent location
+=== admin ===
+=== liveblocks.io ===
+=== zenrouter ===
+```
+
+Like `rm`, `prune` leaves branches alone.
 
 ## Configuration
 
