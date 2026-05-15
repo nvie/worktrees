@@ -58,11 +58,12 @@ $ worktrees --help
 Coordinated multi-repo git worktrees
 
 Usage:
-  worktrees <name> [<base>] [--fetch]   Create a worktree group
-  worktrees ls                          List existing groups
-  worktrees rm <name> [--force]         Remove a group
-  worktrees prune                       Sync source repos after manual cleanup
-  worktrees path <name>                 Print a group's path
+  worktrees <name> [<base>] [--fetch]                          Create a worktree group
+  worktrees ls                                                 List existing groups
+  worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]
+                                                               Remove a group: worktree dirs + branches
+  worktrees prune [--force-rm-branch]                          Finish removal of groups whose dirs are gone
+  worktrees path <name>                                        Print a group's path
 
 Environment:
   WORKTREES_DIR   (default: $HOME/Desktop/worktrees)
@@ -383,7 +384,7 @@ handler is the one place to disable it without losing the prompt label.
 worktrees            # interactive picker (planned, see Roadmap)
 worktrees ls         # list existing groups
 worktrees rm <name>  # remove a group
-worktrees prune      # `git worktree prune` in every source repo
+worktrees prune      # finish removal for groups whose dirs are gone
 worktrees path <name> # print the group's path (for `cd (worktrees path foo)`)
 ```
 
@@ -407,31 +408,76 @@ switch back, a worktree on detached HEAD, or an orphaned admin entry. If
 the warnings become noise for a long-lived `tmp`-style group, we can add
 `--quiet` or a per-group marker later.
 
-`rm` first checks **all** worktrees in the group for uncommitted changes and
-bails out before touching anything if any are dirty. Only once the whole
-group is verified clean does it run `git worktree remove` per repo and
-delete the group directory. Pass `--force` to skip the dirty check (and
-force-remove the worktree dir if `worktree remove` itself refuses — losing
-the worktree is recoverable; we can always re-create it). At the end, `rm`
-runs `git worktree prune` in each source repo as a safety net.
+`rm` is a two-step cleanup:
 
-**`rm` never deletes branches.** That's deliberate — a branch may carry
-unpushed commits that are genuinely worth keeping even when the worktree is
-gone, and losing real work to a bash one-liner is the kind of regret we'd
-rather avoid. Not even `--force` deletes branches. If you want a branch
-gone too, run `git branch -d <name>` (safe — refuses if unmerged) or
-`git branch -D <name>` (forces) in each source repo by hand. Or: just
-re-run `worktrees <name>` later — it'll reuse the existing branch.
+1. **Remove worktree dirs** under `~/Desktop/worktrees/<name>/` and the
+   corresponding `git worktree` admin entries in every source repo.
+2. **Delete the branches** the worktrees were on, in every source repo.
 
-A `--force-delete-branch` flag may land later. For now, keeping branches is
-the conservative default.
+Step 2 is **evidence-based**: a branch is only deleted if there's a
+`git worktree` admin entry whose path is under `~/Desktop/worktrees/<name>/`
+pointing to it. `rm` never matches branches by name alone — if you've already
+manually `rm -rf`'d the group dir, the admin entries that *survived* are
+what tell us which branches to clean. (Once `worktrees prune` has removed
+those admin entries too, the evidence is gone for good — see below.)
 
-`prune` is the escape hatch for "I deleted a group's directory by hand and
-now my source repos think the worktrees still exist." It runs
-`git worktree prune -v` in every repo listed in `REPOS` and pipes git's
-output through unchanged — no parsing, no per-feature scoping, no prettier
-formatting. Each repo's section is prefixed with a one-line header so you
-can tell which output came from which:
+Three safety gates, all checked **upfront across every repo** before
+touching anything:
+
+- **Drift** — a worktree on a branch other than `<name>` (you `git checkout`ed
+  inside). Aborts, no override. Resolve manually (`git checkout <name>`
+  inside the worktree, or rename and pick a different group name) and retry.
+- **Dirty** — a worktree with uncommitted changes (filtering tool-created
+  `?? .claude/`). Aborts. Pass `--force-rm-worktree` to remove the working
+  tree anyway (uncommitted data lost).
+- **Unmerged** — a branch whose tip isn't reachable from its upstream (or
+  `HEAD` if no upstream). Same check `git branch -d` does, run as a
+  preflight. Aborts. Pass `--force-rm-branch` to `git branch -D` (commits
+  lost).
+
+The two `--force-*` flags are orthogonal: dirty worktree + clean branch
+needs only `--force-rm-worktree`; clean worktree + unmerged branch needs
+only `--force-rm-branch`. There is intentionally no umbrella `--force`.
+
+**`rm` is idempotent.** If some repos are in a healthy state and others are
+already half-removed (orphan admin entries pointing at a deleted dir),
+re-running picks up where the previous run left off. The relevant states
+per repo:
+
+| State | Dir | Admin | Action |
+|---|---|---|---|
+| `HEALTHY` | ✓ | ✓ | `git worktree remove` + `git branch -d` |
+| `DIR_ONLY` | ✓ | ✗ | `rm -rf` + skip branch (no evidence) |
+| `ORPHAN_ADMIN` | ✗ | ✓ | `git worktree prune` + `git branch -d` |
+| `GONE` | ✗ | ✗ | nothing |
+
+If *all* repos are `GONE` and the group dir is also gone, `rm` errors out
+("already fully cleaned, or never existed"). The `DIR_ONLY` case is a
+recovery edge: the dir exists but admin is gone — `rm` removes the dir but
+can't safely infer a branch to delete; it prints the exact `git -C <src>
+branch -d <name>` to run by hand.
+
+`prune` is the deferred step 2: "I deleted a group's directory by hand,
+now finish the cleanup". Before delegating to `git worktree prune` (which
+*destroys* the path→branch admin evidence), it walks every source repo's
+admin entries, finds the ones pointing at `~/Desktop/worktrees/<X>/...`
+paths that no longer exist, groups them by `<X>`, and for each group whose
+dir is also gone (= fully removed by hand), deletes the linked branches in
+each repo. Then it prunes the admin entries.
+
+Skips with a warning (rather than aborting like `rm`):
+
+- **Drift in an orphan entry** — admin says the worktree was on a branch
+  other than its group name. We don't second-guess what to delete.
+- **Unmerged branches** — same check as `rm`. Pass `--force-rm-branch` to
+  `git branch -D`.
+
+`--force-rm-worktree` is accepted on `prune` for flag-surface consistency
+with `rm`, but is a no-op there (no working tree left to be dirty).
+
+After the per-group cleanup, `prune` finishes by running `git worktree
+prune -v` in every source repo and piping git's output through unchanged.
+Each repo's section is prefixed with a one-line header:
 
 ```
 $ worktrees prune
@@ -443,7 +489,13 @@ Removing worktrees/feature-xyz: gitdir file points to non-existent location
 === zenrouter ===
 ```
 
-Like `rm`, `prune` leaves branches alone.
+**Order matters.** `rm -rf ~/Desktop/worktrees/foo` followed by
+`worktrees prune` is a complete cleanup, branches and all. But
+`rm -rf ~/Desktop/worktrees/foo` followed by a bare
+`git worktree prune` (in any source repo) destroys the evidence — the
+branches survive as orphans only reachable by name match, which this tool
+deliberately won't do for you. If you find yourself in that state, clean
+the branches by hand.
 
 `path` prints the group's directory to stdout and exits 0. If the group
 doesn't exist, it prints an error to stderr and exits 1 (so wrappers like

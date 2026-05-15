@@ -524,9 +524,73 @@ cmd_path() {
 
 
 # ─── Subcommand: prune ──────────────────────────────────────────────────────
+#
+# Group-aware. Before running `git worktree prune` (which is destructive to
+# branch evidence), walk each source repo's orphan admin entries and, for
+# every group whose dir is *also* gone, delete the linked branches. This is
+# the deferred step 2 of `rm` — what makes `rm -rf <group>` + `prune` a
+# complete cleanup.
+#
+# Skips (warns) on drift (orphan entry's branch differs from group name) and
+# on unmerged branches (unless --force-rm-branch). Best-effort, no aborts.
 
 cmd_prune() {
-  local repo
+  local force_wt=0 force_br=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --force-rm-worktree) force_wt=1 ;;  # accepted for consistency with rm; no-op here
+      --force-rm-branch)   force_br=1 ;;
+      -*) die "Unknown flag: $1" ;;
+      *)  die "Usage: worktrees prune [--force-rm-worktree] [--force-rm-branch]" ;;
+    esac
+    shift
+  done
+
+  # Walk admin entries; queue branch deletions for fully-gone groups.
+  local repo src path br gname
+  local del_repo=() del_branch=() del_group=()
+  for repo in "${REPOS[@]}"; do
+    src=$(source_dir "$repo")
+    [[ -d "$src/.git" ]] || continue
+    while IFS=$'\t' read -r path br; do
+      [[ -z "$path" ]] && continue
+      [[ "$path" == "$WORKTREES_DIR"/* ]] || continue
+      [[ -d "$path" ]] && continue                       # dir still here → not orphan
+      gname="${path#$WORKTREES_DIR/}"; gname="${gname%%/*}"
+      [[ -d "$WORKTREES_DIR/$gname" ]] && continue       # group still partly alive — leave for `rm`
+      [[ -z "$br" ]] && continue                         # detached — no branch to delete
+      if [[ "$br" != "$gname" ]]; then
+        warn "$repo: orphan worktree for group '$gname' was on branch '$br' (drift) — skipping branch deletion"
+        continue
+      fi
+      del_repo+=("$repo")
+      del_branch+=("$br")
+      del_group+=("$gname")
+    done < <(worktree_list_admin "$repo")
+  done
+
+  # Delete branches.
+  local i b
+  for i in "${!del_repo[@]}"; do
+    repo="${del_repo[$i]}"
+    src=$(source_dir "$repo")
+    b="${del_branch[$i]}"
+    if (( force_br == 1 )); then
+      git -C "$src" branch -D "$b" >/dev/null 2>&1 \
+        && ok "$repo: deleted branch $b (group ${del_group[$i]})" \
+        || warn "$repo: failed to delete branch $b"
+    else
+      if branch_safe_to_delete "$src" "$b"; then
+        git -C "$src" branch -d "$b" >/dev/null 2>&1 \
+          && ok "$repo: deleted branch $b (group ${del_group[$i]})" \
+          || warn "$repo: failed to delete branch $b"
+      else
+        warn "$repo: branch '$b' (group '${del_group[$i]}') has unmerged commits — kept. (rerun with --force-rm-branch to force)"
+      fi
+    fi
+  done
+
+  # Finally: prune admin entries everywhere.
   for repo in "${REPOS[@]}"; do
     info "=== $repo ==="
     git -C "$(source_dir "$repo")" worktree prune -v 2>&1 || true
@@ -534,64 +598,198 @@ cmd_prune() {
 }
 
 
+# ─── rm / prune helpers ─────────────────────────────────────────────────────
+
+# Dump every worktree the source knows about as "<path>\t<branch>" lines.
+# Branch is empty for detached worktrees.
+worktree_list_admin() {
+  local repo="$1"
+  local src; src=$(source_dir "$repo")
+  git -C "$src" worktree list --porcelain 2>/dev/null | awk '
+    function flush(){ if (path != "") print path "\t" br; path=""; br="" }
+    /^worktree / { flush(); path = substr($0, 10); next }
+    /^branch /   { br = substr($0, 8); sub("^refs/heads/", "", br) }
+    /^detached/  { br="" }
+    /^$/         { flush() }
+    END          { flush() }
+  '
+}
+
+# State + admin-branch for a given (repo, group) pair. Emits "<state>\t<branch>".
+# State: HEALTHY | DIR_ONLY | ORPHAN_ADMIN | GONE. Branch empty if no admin
+# entry or if the worktree is detached.
+rm_worktree_info() {
+  local repo="$1" name="$2"
+  local wt; wt="$(group_dir "$name")/$repo"
+  local has_dir=0; [[ -d "$wt" ]] && has_dir=1
+  local branch="" has_admin=0 path br
+  while IFS=$'\t' read -r path br; do
+    if [[ "$path" == "$wt" ]]; then has_admin=1; branch="$br"; break; fi
+  done < <(worktree_list_admin "$repo")
+  local state
+  if   (( has_dir == 1 && has_admin == 1 )); then state=HEALTHY
+  elif (( has_dir == 1 && has_admin == 0 )); then state=DIR_ONLY
+  elif (( has_dir == 0 && has_admin == 1 )); then state=ORPHAN_ADMIN
+  else                                            state=GONE
+  fi
+  printf '%s\t%s\n' "$state" "$branch"
+}
+
+# Returns 0 if `git branch -d <b>` would succeed in <src>. Reproduces git's
+# fully-merged check: branch tip is reachable from its upstream (or HEAD).
+# Treats a non-existent branch ref as "safe" (nothing to delete).
+branch_safe_to_delete() {
+  local src="$1" b="$2"
+  git -C "$src" show-ref --verify --quiet "refs/heads/$b" || return 0
+  local cmp
+  cmp=$(git -C "$src" rev-parse --abbrev-ref --symbolic-full-name "$b@{upstream}" 2>/dev/null) || cmp=""
+  [[ -n "$cmp" ]] || cmp="HEAD"
+  git -C "$src" merge-base --is-ancestor "refs/heads/$b" "$cmp" 2>/dev/null
+}
+
+
 # ─── Subcommand: rm ─────────────────────────────────────────────────────────
+#
+# Two-step cleanup with idempotent recovery:
+#   1. Remove worktree dirs under ~/Desktop/worktrees/<name>/
+#   2. Delete the corresponding branches in each source repo
+#
+# Step 2 only runs for branches with *evidence*: a worktree-admin entry whose
+# path is under <group>/. So re-running after a manual `rm -rf` of the group
+# dir still finishes the job (orphan admin entries supply the evidence).
+# Once `worktrees prune` has been run with no dir present, the evidence is
+# gone and the branches can only be cleaned manually.
+#
+# Safety gates (all abort upfront — never partial state):
+#   - drift:    any worktree off-branch → abort, no override
+#   - dirty:    any worktree with uncommitted changes → --force-rm-worktree
+#   - unmerged: any branch with commits not in upstream/HEAD → --force-rm-branch
 
 cmd_rm() {
-  local name="" force=0
+  local name="" force_wt=0 force_br=0
   while (( $# > 0 )); do
     case "$1" in
-      --force) force=1 ;;
+      --force-rm-worktree) force_wt=1 ;;
+      --force-rm-branch)   force_br=1 ;;
       -*) die "Unknown flag: $1" ;;
       *) [[ -z "$name" ]] && name="$1" \
-           || die "Usage: worktrees rm <name> [--force]" ;;
+           || die "Usage: worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]" ;;
     esac
     shift
   done
-  [[ -n "$name" ]] || die "Usage: worktrees rm <name> [--force]"
+  [[ -n "$name" ]] || die "Usage: worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]"
 
   local group; group=$(group_dir "$name")
-  [[ -d "$group" ]] || die "No such group: $name"
 
-  # Upfront dirty check across ALL worktrees — abort before touching anything.
-  # Filter out `?? .claude/` (the tool-created Claude config dir in repos
-  # whose source has no `.claude/`). git's info/exclude is shared via
-  # $GIT_COMMON_DIR, so we can't suppress this cosmetically without
-  # affecting the source repo — we just exclude it from the dirty check.
-  if (( force == 0 )); then
-    local dirty=() repo wt porcelain
-    for repo in "${REPOS[@]}"; do
-      wt="$group/$repo"
-      [[ -d "$wt" ]] || continue
+  # Per-repo state + admin-branch.
+  local repo i state branch
+  local states=() branches=()
+  local any_present=0
+  for repo in "${REPOS[@]}"; do
+    IFS=$'\t' read -r state branch < <(rm_worktree_info "$repo" "$name")
+    states+=("$state")
+    branches+=("$branch")
+    [[ "$state" != "GONE" ]] && any_present=1
+  done
+
+  if [[ ! -d "$group" ]] && (( any_present == 0 )); then
+    die "No such group, or already fully cleaned: $name"
+  fi
+
+  # Drift check.
+  local drifts=() b
+  for i in "${!REPOS[@]}"; do
+    case "${states[$i]}" in
+      HEALTHY|ORPHAN_ADMIN)
+        b="${branches[$i]}"
+        [[ "$b" != "$name" ]] && drifts+=("${REPOS[$i]}: ${b:-<detached>}")
+        ;;
+      DIR_ONLY)
+        b=$(git -C "$group/${REPOS[$i]}" rev-parse --abbrev-ref HEAD 2>/dev/null) || b=""
+        [[ -n "$b" && "$b" != "HEAD" && "$b" != "$name" ]] && drifts+=("${REPOS[$i]}: $b")
+        ;;
+    esac
+  done
+  if (( ${#drifts[@]} > 0 )); then
+    err "Worktree(s) not on branch '$name' (drift):"
+    local d; for d in "${drifts[@]}"; do err "  $d"; done
+    die "Resolve manually (\`git checkout $name\` inside each, or rename) and retry."
+  fi
+
+  # Dirty check. Filter `?? .claude/` (tool-created in repos with no `.claude/`
+  # in source — git's info/exclude is shared via \$GIT_COMMON_DIR so we can't
+  # suppress cosmetically).
+  if (( force_wt == 0 )); then
+    local dirty=() porcelain wt
+    for i in "${!REPOS[@]}"; do
+      case "${states[$i]}" in HEALTHY|DIR_ONLY) ;; *) continue ;; esac
+      wt="$group/${REPOS[$i]}"
       porcelain=$(git -C "$wt" status --porcelain 2>/dev/null \
         | grep -vE '^\?\? \.claude/$' || true)
-      if [[ -n "$porcelain" ]]; then
-        dirty+=("$repo")
-      fi
+      [[ -n "$porcelain" ]] && dirty+=("${REPOS[$i]}")
     done
     if (( ${#dirty[@]} > 0 )); then
       err "Uncommitted changes in: ${dirty[*]}"
-      die "Refusing to remove. Use --force to override."
+      die "Refusing to remove. Use --force-rm-worktree to override."
     fi
   fi
 
-  # Always pass --force to `git worktree remove` itself. Our upfront dirty
-  # check (above) is the real safety gate. git's own --force just bypasses
-  # its complaint about the (tool-managed) `.claude/` dir being untracked.
-  local repo wt
-  for repo in "${REPOS[@]}"; do
+  # Mergeability check.
+  if (( force_br == 0 )); then
+    local unmerged=()
+    for i in "${!REPOS[@]}"; do
+      case "${states[$i]}" in HEALTHY|ORPHAN_ADMIN) ;; *) continue ;; esac
+      b="${branches[$i]}"
+      [[ -n "$b" ]] || continue
+      branch_safe_to_delete "$(source_dir "${REPOS[$i]}")" "$b" \
+        || unmerged+=("${REPOS[$i]}: $b")
+    done
+    if (( ${#unmerged[@]} > 0 )); then
+      err "Branch(es) with unmerged commits:"
+      local u; for u in "${unmerged[@]}"; do err "  $u"; done
+      die "Refusing to delete (would lose commits). Use --force-rm-branch to override."
+    fi
+  fi
+
+  # Execute.
+  local src
+  for i in "${!REPOS[@]}"; do
+    repo="${REPOS[$i]}"
     wt="$group/$repo"
-    [[ -d "$wt" ]] || continue
-    step "Removing worktree: $repo"
-    git -C "$(source_dir "$repo")" worktree remove --force "$wt" 2>/dev/null \
-      || rm -rf "$wt"
+    src=$(source_dir "$repo")
+    b="${branches[$i]}"
+    case "${states[$i]}" in
+      HEALTHY)
+        step "$repo: removing worktree"
+        git -C "$src" worktree remove --force "$wt" 2>/dev/null \
+          || { rm -rf "$wt"; git -C "$src" worktree prune >/dev/null 2>&1 || true; }
+        ;;
+      DIR_ONLY)
+        step "$repo: removing dir (no admin entry — branch can't be inferred)"
+        rm -rf "$wt"
+        warn "$repo: no admin evidence — skipped branch deletion (manually: \`git -C $src branch -d $name\`)"
+        ;;
+      ORPHAN_ADMIN)
+        step "$repo: pruning orphaned admin entry"
+        git -C "$src" worktree prune >/dev/null 2>&1 || true
+        ;;
+      GONE) continue ;;
+    esac
+    # Branch delete (skip DIR_ONLY: no evidence; skip GONE: handled above).
+    case "${states[$i]}" in HEALTHY|ORPHAN_ADMIN) ;; *) continue ;; esac
+    [[ -n "$b" ]] || continue
+    if (( force_br == 1 )); then
+      git -C "$src" branch -D "$b" >/dev/null 2>&1 \
+        && ok "$repo: deleted branch $b" \
+        || warn "$repo: failed to delete branch $b"
+    else
+      git -C "$src" branch -d "$b" >/dev/null 2>&1 \
+        && ok "$repo: deleted branch $b" \
+        || warn "$repo: failed to delete branch $b (preflight passed — investigate)"
+    fi
   done
 
-  rm -rf "$group"
-
-  # Safety-net prune (catches any admin debris from --force / rm -rf fallback).
-  for repo in "${REPOS[@]}"; do
-    git -C "$(source_dir "$repo")" worktree prune >/dev/null 2>&1 || true
-  done
+  [[ -d "$group" ]] && rm -rf "$group"
 
   ok "Removed: $name"
 }
@@ -604,11 +802,12 @@ usage() {
 Coordinated multi-repo git worktrees
 
 Usage:
-  worktrees <name> [<base>] [--fetch]   Create a worktree group
-  worktrees ls                          List existing groups
-  worktrees rm <name> [--force]         Remove a group
-  worktrees prune                       Sync source repos after manual cleanup
-  worktrees path <name>                 Print a group's path
+  worktrees <name> [<base>] [--fetch]                          Create a worktree group
+  worktrees ls                                                 List existing groups
+  worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]
+                                                               Remove a group: worktree dirs + branches
+  worktrees prune [--force-rm-branch]                          Finish removal of groups whose dirs are gone
+  worktrees path <name>                                        Print a group's path
 
 ${C_DIM}Environment:
   WORKTREES_DIR   (default: \$HOME/Desktop/worktrees)
