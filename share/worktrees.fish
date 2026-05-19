@@ -31,38 +31,49 @@ end
 
 function __wt_on_group --on-variable WORKTREE_GROUP
     if set -q WORKTREE_GROUP; and test -n "$WORKTREE_COLOR_BG"
-        printf '\e]11;%s\a' "$WORKTREE_COLOR_BG" > /dev/tty
+        printf '\e]11;%s\a' "$WORKTREE_COLOR_BG" >/dev/tty
     else
-        printf '\e]111\a' > /dev/tty
+        printf '\e]111\a' >/dev/tty
     end
 end
 
 
-# ─── `worktrees` wrapper: cd into the new group after a successful create ──
+# ─── `worktrees` wrapper: cd into the group after init/switch ──────────────
 #
-# After `worktrees tmp2`, you end up in `~/Desktop/worktrees/tmp2` (direnv
-# loads the .envrc, the chip appears, the tint kicks in). Subcommands
-# (ls / rm / path / prune / -h) pass through unchanged.
+# `cd` is a shell-side concept, so switching lives here. We resolve the target
+# path via the script's hidden `--print-path` flag (same path code the script
+# would use for itself), then `cd` into it:
+#
+#   worktrees switch <name>   →  cd into that group         (alias: go)
+#   worktrees switch          →  cd into the most recent group
+#   worktrees init <name>     →  run the script, then cd into the new group
+#
+# Everything else (ls / rm / prune / -h / …) passes through.
 
 function worktrees
     set -l first $argv[1]
-    set -l subcommands ls rm path prune -h --help
 
-    if test -z "$first"; or contains -- $first $subcommands
-        command worktrees $argv
-        return $status
-    end
-
-    # Create flow: run the script, then cd on success.
-    command worktrees $argv
-    or return $status
-
-    # The group name is the first non-flag positional arg.
-    for arg in $argv
-        if not string match -q -- '--*' $arg
-            set -l p (command worktrees path $arg 2>/dev/null)
-            test -n "$p"; and cd "$p"
+    switch "$first"
+        case switch go
+            set -l target_path (command worktrees switch --print-path $argv[2..-1])
+            or return $status
+            cd "$target_path"
             return 0
-        end
+
+        case init create
+            command worktrees $argv
+            or return $status
+            for arg in $argv[2..-1]
+                if not string match -q -- '--*' $arg
+                    set -l target_path (command worktrees switch --print-path $arg 2>/dev/null)
+                    test -n "$target_path"; and cd "$target_path"
+                    return 0
+                end
+            end
+            return 0
+
+        case '*'
+            command worktrees $argv
+            return $status
     end
 end

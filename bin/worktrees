@@ -326,9 +326,9 @@ setup_one_repo() {
 }
 
 
-# ─── Subcommand: create ─────────────────────────────────────────────────────
+# ─── Subcommand: init ───────────────────────────────────────────────────────
 
-cmd_create() {
+cmd_init() {
   local name="" base="" do_fetch=0
   while (( $# > 0 )); do
     case "$1" in
@@ -337,13 +337,13 @@ cmd_create() {
       *)
         if [[ -z "$name" ]];      then name="$1"
         elif [[ -z "$base" ]];    then base="$1"
-        else die "Usage: worktrees <name> [<base-branch>] [--fetch]"
+        else die "Usage: worktrees init <name> [<base-branch>] [--fetch]"
         fi
         ;;
     esac
     shift
   done
-  [[ -n "$name" ]] || die "Usage: worktrees <name> [<base-branch>] [--fetch]"
+  [[ -n "$name" ]] || die "Usage: worktrees init <name> [<base-branch>] [--fetch]"
   base="${base:-$DEFAULT_BASE}"
 
   # Pre-flight: source repos exist
@@ -512,13 +512,53 @@ cmd_ls() {
 }
 
 
-# ─── Subcommand: path ───────────────────────────────────────────────────────
+# ─── Subcommand: switch / go ────────────────────────────────────────────────
+#
+# Two-headed: the directory change itself can only happen in the parent shell,
+# so the real implementation lives in the Fish wrapper. The wrapper invokes
+# this subcommand with the hidden `--print-path` flag to resolve the group
+# (latest if no name) and emit its path on stdout, then `cd`s into it.
+#
+# Without `--print-path` we assume someone ran the binary directly — point them
+# at the wrapper rather than silently doing nothing useful.
 
-cmd_path() {
-  local name="${1:-}"
-  [[ -n "$name" ]] || die "Usage: worktrees path <name>"
+cmd_switch() {
+  local print_path=0 name=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --print-path) print_path=1 ;;
+      -*)           die "Unknown flag: $1" ;;
+      *)
+        if [[ -z "$name" ]]; then name="$1"
+        else die "Usage: worktrees switch [<name>]"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if (( print_path == 0 )); then
+    err "\`worktrees switch\` changes your shell's directory — it can only work through the Fish wrapper."
+    err "Install it: ln -s $(share_dir)/worktrees.fish ~/.config/fish/conf.d/worktrees.fish"
+    exit 2
+  fi
+
+  if [[ -z "$name" ]]; then
+    [[ -d "$WORKTREES_DIR" ]] || die "No worktree groups yet (WORKTREES_DIR=$WORKTREES_DIR)."
+    name=$(ls -t "$WORKTREES_DIR" 2>/dev/null | grep -v '^\.' | head -n 1)
+    [[ -n "$name" ]] || die "No worktree groups yet (WORKTREES_DIR=$WORKTREES_DIR)."
+  fi
   local group; group=$(group_dir "$name")
-  [[ -d "$group" ]] || die "No such group: $name"
+  if [[ ! -d "$group" ]]; then
+    err "No such group: $name"
+    local existing=""
+    [[ -d "$WORKTREES_DIR" ]] && existing=$(ls -1 "$WORKTREES_DIR" 2>/dev/null | grep -v '^\.' || true)
+    if [[ -n "$existing" ]]; then
+      printf '\nExisting worktrees:\n' >&2
+      while IFS= read -r g; do printf '  %s\n' "$g" >&2; done <<< "$existing"
+    fi
+    exit 1
+  fi
   printf '%s\n' "$group"
 }
 
@@ -802,28 +842,24 @@ usage() {
 Coordinated multi-repo git worktrees
 
 Usage:
-  worktrees <name> [<base>] [--fetch]                          Create a worktree group
+  worktrees init <name> [<base>] [--fetch]                     Create a worktree group (alias: create)
+  worktrees switch [<name>]                                    Switch to a group; no <name> → latest (alias: go)
   worktrees ls                                                 List existing groups
   worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]
                                                                Remove a group: worktree dirs + branches
   worktrees prune [--force-rm-branch]                          Finish removal of groups whose dirs are gone
-  worktrees path <name>                                        Print a group's path
-
-${C_DIM}Environment:
-  WORKTREES_DIR   (default: \$HOME/Desktop/worktrees)
-  SOURCE_ROOT     (default: \$HOME/Projects/liveblocks)
-  DEFAULT_BASE    (default: origin/main)${C_RESET}
 EOF
 }
 
 main() {
   case "${1:-}" in
     ""|-h|--help)        usage ;;
-    ls|list)             shift; cmd_ls    "$@" ;;
-    rm|remove|delete)    shift; cmd_rm    "$@" ;;
-    path)                shift; cmd_path  "$@" ;;
-    prune)               shift; cmd_prune "$@" ;;
-    *)                   cmd_create "$@" ;;
+    ls|list)             shift; cmd_ls     "$@" ;;
+    rm|remove|delete)    shift; cmd_rm     "$@" ;;
+    prune)               shift; cmd_prune  "$@" ;;
+    init|create)         shift; cmd_init   "$@" ;;
+    switch|go)           shift; cmd_switch "$@" ;;
+    *)                   usage >&2; exit 2 ;;
   esac
 }
 
