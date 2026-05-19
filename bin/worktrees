@@ -558,10 +558,16 @@ cmd_ls() {
 
 # ─── Subcommand: status / st ────────────────────────────────────────────────
 #
-# Lists the repos in a group that have uncommitted changes (= the same set
-# that would block `rm` without `--force-rm-worktree`). Defaults to the
-# group inferred from $WORKTREE_GROUP (set by the group's .envrc). Exits 0
-# if everything is clean, 1 if any repo is dirty.
+# Lists the repos in a group that need attention, annotated with what's up:
+#
+#   uncommitted   working tree has staged/unstaged/untracked changes
+#                 (same set that blocks `rm` without --force-rm-worktree)
+#   ahead         branch has commits not reachable from its upstream (or
+#                 HEAD-of-source if no upstream), i.e. unpushed/unmerged work
+#                 (same set that blocks `rm` without --force-rm-branch)
+#
+# Defaults to the group inferred from $WORKTREE_GROUP (set by the group's
+# .envrc). Exits 0 if every repo is clean on both axes, 1 if any aren't.
 
 cmd_status() {
   local name="${1:-${WORKTREE_GROUP:-}}"
@@ -569,9 +575,20 @@ cmd_status() {
   local group; group=$(group_dir "$name")
   [[ -d "$group" ]] || die "No such group: $name"
 
-  local dirty; dirty=$(group_dirty_repos "$name")
-  [[ -n "$dirty" ]] || return 0
-  printf '%s\n' "$dirty"
+  local dirty unmerged
+  dirty=$(group_dirty_repos "$name")
+  unmerged=$(group_unmerged_repos "$name")
+  [[ -z "$dirty" && -z "$unmerged" ]] && return 0
+
+  local repo flags
+  for repo in "${REPOS[@]}"; do
+    flags=""
+    grep -qFx -- "$repo" <<< "$dirty"    && flags="uncommitted"
+    if grep -qFx -- "$repo" <<< "$unmerged"; then
+      [[ -n "$flags" ]] && flags+=", ahead" || flags="ahead"
+    fi
+    [[ -n "$flags" ]] && printf '%s: %s\n' "$repo" "$flags"
+  done
   return 1
 }
 
@@ -702,7 +719,7 @@ cmd_prune() {
 }
 
 
-# ─── Dirty-repo detection ───────────────────────────────────────────────────
+# ─── Group-level dirty / unmerged detection ─────────────────────────────────
 
 # Print the names of repos in <group> whose worktrees have uncommitted changes,
 # one per line. Empty output ⇒ everything is clean. Filters tool-created
@@ -717,6 +734,22 @@ group_dirty_repos() {
     porcelain=$(git -C "$wt" status --porcelain 2>/dev/null \
       | grep -vE '^\?\? \.claude/$' || true)
     [[ -n "$porcelain" ]] && printf '%s\n' "$repo"
+  done
+  return 0
+}
+
+# Print the names of repos in <group> whose branch <name> has commits not
+# reachable from its upstream (or HEAD-of-source if no upstream is set) —
+# i.e. there's local commit work that hasn't landed yet. Same predicate
+# `git branch -d` uses, via branch_safe_to_delete (defined below).
+group_unmerged_repos() {
+  local name="$1"
+  local repo src
+  for repo in "${REPOS[@]}"; do
+    src=$(source_dir "$repo")
+    [[ -d "$src/.git" ]] || continue
+    git -C "$src" show-ref --verify --quiet "refs/heads/$name" || continue
+    branch_safe_to_delete "$src" "$name" || printf '%s\n' "$repo"
   done
   return 0
 }
