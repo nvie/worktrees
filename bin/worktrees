@@ -344,7 +344,14 @@ cmd_init() {
     shift
   done
   [[ -n "$name" ]] || die "Usage: worktrees init <name> [<base-branch>] [--fetch]"
-  base="${base:-$DEFAULT_BASE}"
+
+  # If no explicit base was passed, we default to $DEFAULT_BASE (origin/main).
+  # That remote ref needs to be up-to-date or we'd branch from stale state, so
+  # force a fetch in that case. With an explicit base, trust the caller.
+  if [[ -z "$base" ]]; then
+    base="$DEFAULT_BASE"
+    do_fetch=1
+  fi
 
   # Pre-flight: source repos exist
   local repo
