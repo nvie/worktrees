@@ -233,6 +233,32 @@ write_envrc_if_missing() {
   } > "$target"
 }
 
+# Each worktree-level `.envrc` needs `source_up_if_exists` so direnv inherits
+# the group's WORKTREE_GROUP/WORKTREE_ROOT exports when you `cd` into a child
+# repo. If the source repo's `.envrc` already has the line, this is a no-op.
+# Otherwise we patch the worktree copy in place — left as an uncommitted local
+# change so the user can decide whether to upstream it. `worktrees status`
+# will surface it as dirty until then; that's fine.
+ensure_source_up() {
+  local wt="$1"
+  local envrc="$wt/.envrc"
+  local touched=0
+
+  if [[ ! -f "$envrc" ]]; then
+    printf 'source_up_if_exists\n' > "$envrc"
+    touched=1
+  elif ! grep -qE '^[[:space:]]*source_up(_if_exists)?\b' "$envrc"; then
+    local tmp; tmp=$(mktemp)
+    { printf 'source_up_if_exists\n'; cat "$envrc"; } > "$tmp"
+    mv "$tmp" "$envrc"
+    touched=1
+  fi
+
+  if (( touched == 1 )); then
+    direnv allow "$envrc" >/dev/null 2>&1 || true
+  fi
+}
+
 write_claude_md_if_missing() {
   local name="$1"
   local target; target="$(group_dir "$name")/CLAUDE.md"
@@ -474,6 +500,17 @@ cmd_init() {
       direnv_path_allowed "$src_envrc" || continue
       direnv allow "$wt_envrc" >/dev/null 2>&1 || true
     done < <(git -C "$wt" ls-files 2>/dev/null | grep -E '(^|/)\.envrc$' || true)
+  done
+
+  # Make sure each worktree's .envrc inherits the group's vars via
+  # `source_up_if_exists`. Runs after pre-allow so a clean source-matching
+  # .envrc gets allowed first; this step then patches if needed and
+  # re-allows the patched file.
+  step "Ensuring each worktree's .envrc inherits group vars (source_up_if_exists)"
+  for repo in "${REPOS[@]}"; do
+    local wt="$(group_dir "$name")/$repo"
+    [[ -d "$wt" ]] || continue
+    ensure_source_up "$wt"
   done
 
   ok "Created: $(group_dir "$name")"
