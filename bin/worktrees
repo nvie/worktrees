@@ -216,13 +216,16 @@ write_envrc_if_missing() {
     echo ""
     echo "export WORKTREE_GROUP=\"$name\""
     echo "export WORKTREE_ROOT=\"\$PWD\""
+    echo ""
+    echo "# OSC 11 terminal tint. Uncomment a different line to override."
     local entry hex color_name
     for entry in "${PALETTE[@]}"; do
       hex="${entry%% *}"
       color_name="${entry#* }"
-      echo "#export WORKTREE_COLOR_BG=\"$hex\"   # $color_name"
+      echo "#bg=\"$hex\"   # $color_name"
     done
-    echo "export WORKTREE_COLOR_BG=\"$bg\"   # OSC 11 terminal tint; hashed from name"
+    echo "bg=\"$bg\"   # hashed from name"
+    echo "printf '\\e]11;%s\\a' \"\$bg\" > /dev/tty"
     echo ""
     echo "# Group root + a few container subdirs (mirrors your global CDPATH)."
     echo "path_add CDPATH \"\$PWD\""

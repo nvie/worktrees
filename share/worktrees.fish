@@ -23,18 +23,14 @@ function wt_cd --argument-names rel
 end
 
 
-# ─── Terminal background tint via OSC 11 ───────────────────────────────────
+# ─── Terminal background tint reset via OSC 111 ────────────────────────────
 #
-# Fires when WORKTREE_GROUP is set or erased. Tints the terminal background
-# on group entry, resets on exit. Writes to /dev/tty so direnv / pipelines
-# can't swallow the escape sequence.
+# Resets the terminal background when WORKTREE_GROUP becomes undefined.
+# Group entry's OSC 11 is emitted from the .envrc itself — fish events would
+# race with direnv's randomized variable emit order.
 
 function __wt_on_group --on-variable WORKTREE_GROUP
-    if set -q WORKTREE_GROUP; and test -n "$WORKTREE_COLOR_BG"
-        printf '\e]11;%s\a' "$WORKTREE_COLOR_BG" >/dev/tty
-    else
-        printf '\e]111\a' >/dev/tty
-    end
+    set -q WORKTREE_GROUP; or printf '\e]111\a' >/dev/tty
 end
 
 
