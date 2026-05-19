@@ -519,6 +519,26 @@ cmd_ls() {
 }
 
 
+# ─── Subcommand: status / st ────────────────────────────────────────────────
+#
+# Lists the repos in a group that have uncommitted changes (= the same set
+# that would block `rm` without `--force-rm-worktree`). Defaults to the
+# group inferred from $WORKTREE_GROUP (set by the group's .envrc). Exits 0
+# if everything is clean, 1 if any repo is dirty.
+
+cmd_status() {
+  local name="${1:-${WORKTREE_GROUP:-}}"
+  [[ -n "$name" ]] || die "Usage: worktrees status [<name>] (or run from inside a group)"
+  local group; group=$(group_dir "$name")
+  [[ -d "$group" ]] || die "No such group: $name"
+
+  local dirty; dirty=$(group_dirty_repos "$name")
+  [[ -n "$dirty" ]] || return 0
+  printf '%s\n' "$dirty"
+  return 1
+}
+
+
 # ─── Subcommand: switch / go ────────────────────────────────────────────────
 #
 # Two-headed: the directory change itself can only happen in the parent shell,
@@ -645,6 +665,26 @@ cmd_prune() {
 }
 
 
+# ─── Dirty-repo detection ───────────────────────────────────────────────────
+
+# Print the names of repos in <group> whose worktrees have uncommitted changes,
+# one per line. Empty output ⇒ everything is clean. Filters tool-created
+# `?? .claude/` noise (see setup_claude_config). Shared by `status` and `rm`.
+group_dirty_repos() {
+  local name="$1"
+  local group; group=$(group_dir "$name")
+  local repo wt porcelain
+  for repo in "${REPOS[@]}"; do
+    wt="$group/$repo"
+    [[ -d "$wt" ]] || continue
+    porcelain=$(git -C "$wt" status --porcelain 2>/dev/null \
+      | grep -vE '^\?\? \.claude/$' || true)
+    [[ -n "$porcelain" ]] && printf '%s\n' "$repo"
+  done
+  return 0
+}
+
+
 # ─── rm / prune helpers ─────────────────────────────────────────────────────
 
 # Dump every worktree the source knows about as "<path>\t<branch>" lines.
@@ -763,20 +803,11 @@ cmd_rm() {
     die "Resolve manually (\`git checkout $name\` inside each, or rename) and retry."
   fi
 
-  # Dirty check. Filter `?? .claude/` (tool-created in repos with no `.claude/`
-  # in source — git's info/exclude is shared via \$GIT_COMMON_DIR so we can't
-  # suppress cosmetically).
+  # Dirty check (see group_dirty_repos).
   if (( force_wt == 0 )); then
-    local dirty=() porcelain wt
-    for i in "${!REPOS[@]}"; do
-      case "${states[$i]}" in HEALTHY|DIR_ONLY) ;; *) continue ;; esac
-      wt="$group/${REPOS[$i]}"
-      porcelain=$(git -C "$wt" status --porcelain 2>/dev/null \
-        | grep -vE '^\?\? \.claude/$' || true)
-      [[ -n "$porcelain" ]] && dirty+=("${REPOS[$i]}")
-    done
-    if (( ${#dirty[@]} > 0 )); then
-      err "Uncommitted changes in: ${dirty[*]}"
+    local dirty; dirty=$(group_dirty_repos "$name")
+    if [[ -n "$dirty" ]]; then
+      err "Uncommitted changes in: $(echo $dirty)"
       die "Refusing to remove. Use --force-rm-worktree to override."
     fi
   fi
@@ -852,6 +883,7 @@ Usage:
   worktrees init <name> [<base>] [--fetch]                     Create a worktree group (alias: create)
   worktrees switch [<name>]                                    Switch to a group; no <name> → latest (alias: go)
   worktrees ls                                                 List existing groups
+  worktrees status [<name>]                                    List repos with local changes (alias: st)
   worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]
                                                                Remove a group: worktree dirs + branches
   worktrees prune [--force-rm-branch]                          Finish removal of groups whose dirs are gone
@@ -862,6 +894,7 @@ main() {
   case "${1:-}" in
     ""|-h|--help)        usage ;;
     ls|list)             shift; cmd_ls     "$@" ;;
+    status|st)           shift; cmd_status "$@" ;;
     rm|remove|delete)    shift; cmd_rm     "$@" ;;
     prune)               shift; cmd_prune  "$@" ;;
     init|create)         shift; cmd_init   "$@" ;;
