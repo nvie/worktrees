@@ -563,10 +563,11 @@ cmd_ls() {
 #
 # Lists the repos in a group that need attention, annotated with what's up:
 #
-#   uncommitted   working tree has staged/unstaged/untracked changes
-#                 (same set that blocks `rm` without --force-rm-worktree)
-#   ahead         branch has commits not reachable from its upstream (or
-#                 HEAD-of-source if no upstream), i.e. unpushed/unmerged work
+#   has uncommitted changes   working tree has staged/unstaged/untracked changes
+#                             (same set that blocks `rm` without --force-rm-worktree)
+#   has unpushed commits      branch has commits not reachable from its upstream
+#                             (or HEAD-of-source if no upstream), i.e. unpushed/
+#                             unmerged work
 #                 (same set that blocks `rm` without --force-rm-branch)
 #
 # Defaults to the group inferred from $WORKTREE_GROUP (set by the group's
@@ -586,9 +587,9 @@ cmd_status() {
   local repo flags
   for repo in "${REPOS[@]}"; do
     flags=""
-    grep -qFx -- "$repo" <<< "$dirty"    && flags="uncommitted"
+    grep -qFx -- "$repo" <<< "$dirty"    && flags="has uncommitted changes"
     if grep -qFx -- "$repo" <<< "$unmerged"; then
-      [[ -n "$flags" ]] && flags+=", ahead" || flags="ahead"
+      [[ -n "$flags" ]] && flags+=", has unpushed commits" || flags="has unpushed commits"
     fi
     [[ -n "$flags" ]] && printf '%s: %s\n' "$repo" "$flags"
   done
