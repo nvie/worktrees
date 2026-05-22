@@ -318,16 +318,55 @@ setup_claude_config() {
 
 # ─── Per-repo worktree setup ────────────────────────────────────────────────
 
+# Decide what branch action to take for <name> in <repo>:
+#   1. local branch <name> exists                   → reuse it
+#   2. origin/<name> exists                         → branch off origin/<name>
+#   3. otherwise                                    → branch off <default_base>
+#
+# Sets globals (used as multi-return — read immediately by the caller):
+#   BRANCH_CREATE_FROM    empty ⇒ reuse local; otherwise the ref to branch from
+#   BRANCH_ANNOTATION     human-readable summary for the ✓ line
+#   BRANCH_STALE_WARNING  non-empty when reusing origin/<name> and it's behind
+resolve_branch_plan() {
+  local repo="$1" name="$2" default_base="$3"
+  local src; src=$(source_dir "$repo")
+
+  BRANCH_CREATE_FROM=""
+  BRANCH_ANNOTATION=""
+  BRANCH_STALE_WARNING=""
+
+  if git -C "$src" show-ref --quiet "refs/heads/$name"; then
+    BRANCH_ANNOTATION="reused local branch"
+    return
+  fi
+
+  if git -C "$src" show-ref --quiet "refs/remotes/origin/$name"; then
+    BRANCH_CREATE_FROM="origin/$name"
+    local behind
+    behind=$(git -C "$src" rev-list --count "origin/$name..$default_base" 2>/dev/null || printf 0)
+    if (( behind > 0 )); then
+      BRANCH_ANNOTATION="created from origin/$name ($behind commits behind $default_base)"
+      BRANCH_STALE_WARNING="$repo: origin/$name is $behind commits behind $default_base — branched from it anyway"
+    else
+      BRANCH_ANNOTATION="created from origin/$name"
+    fi
+    return
+  fi
+
+  BRANCH_CREATE_FROM="$default_base"
+  BRANCH_ANNOTATION="created from $default_base"
+}
+
 setup_one_repo() {
-  local repo="$1" name="$2" base="$3"
+  local repo="$1" name="$2" create_from="$3"
   local src; src=$(source_dir "$repo")
   local wt; wt="$(group_dir "$name")/$repo"
 
-  # Branch resolution: reuse if local exists, otherwise create from base.
-  if git -C "$src" show-ref --quiet "refs/heads/$name"; then
+  # Empty create_from ⇒ reuse the existing local branch <name>.
+  if [[ -z "$create_from" ]]; then
     git -C "$src" worktree add --no-checkout "$wt" "$name" >/dev/null
   else
-    git -C "$src" worktree add --no-checkout -b "$name" "$wt" "$base" >/dev/null
+    git -C "$src" worktree add --no-checkout -b "$name" "$wt" "$create_from" >/dev/null
   fi
 
   # Symlink git-crypt key dir from source so smudge filters work on checkout.
@@ -425,9 +464,10 @@ cmd_init() {
   mkdir -p "$(group_dir "$name")"
 
   # Per-repo setup. State checks (HEALTHY skip, STALE cleanup, ORPHAN prune)
-  # run synchronously; the actual `setup_one_repo` work goes in parallel.
+  # and branch-plan resolution run synchronously; the actual `setup_one_repo`
+  # work goes in parallel.
   local state
-  local pids=() started_repos=() logs=()
+  local pids=() started_repos=() logs=() annotations=() stale_warnings=()
   for repo in "${REPOS[@]}"; do
     state=$(worktree_state "$repo" "$name")
     case "$state" in
@@ -449,19 +489,30 @@ cmd_init() {
       NEEDED) : ;;
     esac
 
+    resolve_branch_plan "$repo" "$name" "$base"
+    annotations+=("$BRANCH_ANNOTATION")
+    [[ -n "$BRANCH_STALE_WARNING" ]] && stale_warnings+=("$BRANCH_STALE_WARNING")
+
     local log; log=$(mktemp)
     logs+=("$log")
     started_repos+=("$repo")
-    (setup_one_repo "$repo" "$name" "$base" >"$log" 2>&1) &
+    (setup_one_repo "$repo" "$name" "$BRANCH_CREATE_FROM" >"$log" 2>&1) &
     pids+=($!)
   done
 
   if (( ${#pids[@]} > 0 )); then
+    # Surface stale-origin warnings BEFORE the slow parallel work — gives the
+    # user a chance to Ctrl-C if reusing an outdated origin/<name> wasn't the
+    # intent.
+    if (( ${#stale_warnings[@]} > 0 )); then
+      local w
+      for w in "${stale_warnings[@]}"; do warn "$w"; done
+    fi
     step "Setting up worktrees in parallel: ${started_repos[*]}"
     local i any_failed=0
     for i in "${!pids[@]}"; do
       if wait "${pids[$i]}"; then
-        ok "${started_repos[$i]}"
+        ok "${started_repos[$i]} — ${annotations[$i]}"
       else
         err "${started_repos[$i]} failed:"
         cat "${logs[$i]}" >&2
