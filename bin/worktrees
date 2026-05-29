@@ -21,18 +21,18 @@ REPOS=(
   zenrouter
 )
 
-# Subdir patterns to prepend to CDPATH, mirroring the user's global CDPATH so
-# `cd <something>` from inside a group resolves to this group's worktree first.
-# The group root itself is always prepended too (see write_envrc_if_missing),
-# so per-repo entries (`liveblocks`, `admin`, …) aren't needed — they're
-# subsumed by the group root.
+# Subdirs to include in CDPATH when inside a group, so `cd <something>`
+# resolves to this group's worktree first. Order here is the desired final
+# CDPATH order (after `.`); see write_envrc_if_missing for how path_add
+# reverse-builds it. The group root ($PWD) is appended last as a catch-all.
 CDPATH_SUBDIRS=(
   "liveblocks/packages"
   "liveblocks/tools"
-  "liveblocks/schema-lang"
   "liveblocks-backend/apps"
   "liveblocks-backend/shared"
   "liveblocks-backend/tools"
+  "liveblocks"
+  "liveblocks-backend"
 )
 
 # 8-entry palette of subtle dark backgrounds, one per OSC 11 terminal tint.
@@ -227,12 +227,15 @@ write_envrc_if_missing() {
     echo "bg=\"$bg\"   # hashed from name"
     echo "printf '\\e]11;%s\\a' \"\$bg\" > /dev/tty"
     echo ""
-    echo "# Group root + a few container subdirs (mirrors your global CDPATH)."
+    echo "# Reset CDPATH, then rebuild: '.' first, group root, container subdirs."
+    echo "# path_add prepends, so add in reverse order of desired final order."
+    echo "export CDPATH=\"\""
     echo "path_add CDPATH \"\$PWD\""
-    local sub
-    for sub in "${CDPATH_SUBDIRS[@]}"; do
-      echo "path_add CDPATH \"\$PWD/$sub\""
+    local i
+    for (( i=${#CDPATH_SUBDIRS[@]}-1; i>=0; i-- )); do
+      echo "path_add CDPATH \"\$PWD/${CDPATH_SUBDIRS[$i]}\""
     done
+    echo "path_add CDPATH \".\""
   } > "$target"
 }
 
