@@ -72,6 +72,21 @@ fi
 
 info() { printf '%s\n' "$*"; }
 step() { printf '%s→%s %s\n' "$C_BLUE" "$C_RESET" "$*"; }
+
+# Decorate a branch-plan annotation for the init ✓ lines: color the leading
+# verb and append an emoji so reused (existing) vs created (fresh) branches are
+# visually distinct. "reused" → yellow ⚠️ (you're building on prior work),
+# "created" → blue ✨ (a fresh branch). Anything else passes through untouched.
+format_branch_annotation() {
+  local ann="$1" first rest
+  first="${ann%% *}"; rest="${ann#"$first"}"
+  case "$first" in
+    reused)  printf '%s%s%s%s ⚠️'  "$C_YELLOW" "$first" "$C_RESET" "$rest" ;;
+    created) printf '%s%s%s%s ✨'  "$C_BLUE"   "$first" "$C_RESET" "$rest" ;;
+    *)       printf '%s' "$ann" ;;
+  esac
+}
+
 ok()   { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 warn() { printf '%swarning:%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 err()  { printf '%serror:%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
@@ -515,7 +530,7 @@ cmd_init() {
     local i any_failed=0
     for i in "${!pids[@]}"; do
       if wait "${pids[$i]}"; then
-        ok "${started_repos[$i]} — ${annotations[$i]}"
+        ok "${started_repos[$i]} — $(format_branch_annotation "${annotations[$i]}")"
       else
         err "${started_repos[$i]} failed:"
         cat "${logs[$i]}" >&2
