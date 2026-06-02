@@ -43,8 +43,10 @@ end
 #   worktrees switch <name>   →  cd into that group         (alias: go)
 #   worktrees switch          →  cd into the most recent group
 #   worktrees init <name>     →  run the script, then cd into the new group
+#   worktrees ls / list       →  interactive picker on a TTY; ⏎ cd's into the
+#                                chosen group, create's path is cd'd into too
 #
-# Everything else (ls / rm / prune / -h / …) passes through.
+# Everything else (rm / prune / -h / …) passes through.
 
 function worktrees
     set -l first $argv[1]
@@ -55,6 +57,31 @@ function worktrees
             or return $status
             cd "$target_path"
             return 0
+
+        case ls list
+            set -l rest $argv[2..-1]
+
+            # `wl <name>` jumps straight to that group, like the old `wg <name>`.
+            if test (count $rest) -ge 1; and not string match -q -- '-*' $rest[1]
+                set -l target_path (command worktrees switch --print-path $rest[1])
+                or return $status
+                cd "$target_path"
+                return 0
+            end
+
+            # Bare `ls`/`list` on a real terminal opens the interactive picker.
+            # Piped/redirected (or with flags) it falls through to the plain
+            # name-dumping behavior so scripts keep working. The picker draws to
+            # /dev/tty and prints just the chosen group's path on stdout, which
+            # we cd into (⏎ on a group, or after creating one).
+            if test (count $rest) -eq 0; and isatty stdout
+                set -l target_path (command worktrees ls --interactive)
+                or return $status
+                test -n "$target_path"; and cd "$target_path"
+                return 0
+            end
+            command worktrees $argv
+            return $status
 
         case init create
             command worktrees $argv

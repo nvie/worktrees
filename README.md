@@ -381,17 +381,22 @@ handler is the one place to disable it without losing the prompt label.
 ## Other commands
 
 ```sh
-worktrees            # interactive picker (planned, see Roadmap)
-worktrees ls         # list existing groups
+worktrees ls         # interactive picker on a TTY; pipe-friendly name list otherwise
 worktrees rm <name>  # remove a group
 worktrees prune      # finish removal for groups whose dirs are gone
 worktrees path <name> # print the group's path (for `cd (worktrees path foo)`)
 ```
 
-`ls` prints one group name per line, alphabetical, on **stdout**. No path,
-no status, no header — pipe-friendly for `fzf`, `xargs`, `head`. A richer
-view is what the future TUI (Roadmap) is for; for now `--long` doesn't
-exist (add when needed).
+`ls` has two faces. Through the Fish wrapper on a terminal it opens an
+interactive picker (the one entry point — it subsumes the old `wg`/`wr`
+aliases): `↑/↓` to move, `⏎` to `cd` into a group, `d` to remove one (with a
+confirm dialog whose two checkboxes map to the `--force-rm-*` flags), or drop
+onto the trailing row to create a new group (optionally picking a base branch
+from every local branch across all repos, uniq'd).
+
+When stdout isn't a terminal — `worktrees ls | fzf`, `… | xargs`, `… | head` —
+it falls back to printing one group name per line, alphabetical, on
+**stdout**: no path, no status, no header.
 
 On **stderr**, `ls` emits a one-line warning per group whose worktrees
 aren't all on the group's own branch. Reading `<source>/.git/worktrees/<name>/HEAD`
@@ -551,12 +556,6 @@ fine for v1.
 - All five source repos cloned under `SOURCE_ROOT`
 
 ## Roadmap
-
-### Soon
-
-- **Interactive TUI.** Running `liveblocks-worktree` with no args opens a
-  picker listing existing groups. `↑/↓` to navigate, `enter` to `cd`, `x` to
-  delete (with confirmation), `n` to create a new one.
 
 ### Later
 

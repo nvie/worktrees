@@ -594,37 +594,383 @@ cmd_init() {
 
 # ─── Subcommand: ls ─────────────────────────────────────────────────────────
 
-cmd_ls() {
+# Populate the global WT_GROUPS array with existing group names, alphabetical.
+collect_groups() {
+  WT_GROUPS=()
   [[ -d "$WORKTREES_DIR" ]] || return 0
-
-  local groups=() d
+  local d
   while IFS= read -r d; do
-    groups+=("$(basename "$d")")
+    WT_GROUPS+=("$(basename "$d")")
   done < <(find "$WORKTREES_DIR" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort)
+}
 
-  # Emit stderr warnings for off-branch worktrees, stdout for the names.
-  local name repo wt branch off
-  for name in "${groups[@]}"; do
-    off=()
-    for repo in "${REPOS[@]}"; do
-      wt="$(group_dir "$name")/$repo"
-      [[ -d "$wt" ]] || continue
-      branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || {
-        off+=("$repo:no-git")
-        continue
-      }
-      if [[ "$branch" == "HEAD" ]]; then
-        off+=("$repo:detached")
-      elif [[ "$branch" != "$name" ]]; then
-        off+=("${repo}→${branch}")
-      fi
-    done
-    if (( ${#off[@]} > 0 )); then
-      warn "$name: ${#off[@]} of ${#REPOS[@]} worktrees off-branch (${off[*]})"
+# Echo a short summary of <group>'s off-branch worktrees, or nothing if every
+# worktree is on its own branch.
+group_offbranch_summary() {
+  local name="$1" repo wt branch off=()
+  for repo in "${REPOS[@]}"; do
+    wt="$(group_dir "$name")/$repo"
+    [[ -d "$wt" ]] || continue
+    branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || {
+      off+=("$repo:no-git")
+      continue
+    }
+    if [[ "$branch" == "HEAD" ]]; then
+      off+=("$repo:detached")
+    elif [[ "$branch" != "$name" ]]; then
+      off+=("${repo}→${branch}")
     fi
   done
+  (( ${#off[@]} > 0 )) && printf '%d of %d worktrees off-branch (%s)' \
+    "${#off[@]}" "${#REPOS[@]}" "${off[*]}"
+  return 0
+}
 
-  (( ${#groups[@]} > 0 )) && printf '%s\n' "${groups[@]}"
+cmd_ls() {
+  local interactive=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --interactive) interactive=1 ;;
+      -*)            die "Unknown flag: $1" ;;
+      *)             die "Usage: worktrees ls [--interactive]" ;;
+    esac
+    shift
+  done
+
+  if (( interactive == 1 )); then
+    picker_loop
+    return
+  fi
+
+  collect_groups
+
+  # Emit stderr warnings for off-branch worktrees, stdout for the names.
+  local name summary
+  for name in "${WT_GROUPS[@]}"; do
+    summary=$(group_offbranch_summary "$name")
+    [[ -n "$summary" ]] && warn "$name: $summary"
+  done
+
+  (( ${#WT_GROUPS[@]} > 0 )) && printf '%s\n' "${WT_GROUPS[@]}"
+  return 0
+}
+
+
+# ─── Interactive picker (TTY) ───────────────────────────────────────────────
+#
+# `worktrees ls --interactive` (invoked by the Fish wrapper when stdout is a
+# terminal) opens a keyboard-driven picker. It replaces the old `wg`/`wr` fzf
+# aliases: navigate groups, ⏎ to open (the wrapper cd's in), `d` to remove
+# (with a confirm dialog), or drop onto the trailing row to create a new group.
+#
+# All rendering and key input go through /dev/tty so that the single line we
+# print on stdout (the chosen group's path) stays clean for the wrapper to
+# capture. Subcommands we shell out to (rm/init) also have their output routed
+# to /dev/tty for the same reason.
+
+TTY=/dev/tty
+
+# Always-on colors for picker chrome. The module-level C_* vars go dark when
+# the binary's own stdout isn't a tty — which it never is under the wrapper
+# (stdout is captured) — but we're always drawing to a real terminal here.
+P_DIM=$'\e[2m'; P_BOLD=$'\e[1m'
+P_RED=$'\e[31m'; P_GREEN=$'\e[32m'; P_YELLOW=$'\e[33m'
+P_BLUE=$'\e[34m'; P_CYAN=$'\e[36m'; P_RESET=$'\e[0m'
+
+_tty_setup()   { printf '\e[?1049h\e[?25l' > "$TTY"; }   # alt screen, hide cursor
+_tty_restore() { printf '\e[?25h\e[?1049l' > "$TTY"; }   # show cursor, primary screen
+
+# Blank the screen + home the cursor. Used once when switching between distinct
+# screens (picker → dialog → create) so a differently-shaped previous screen
+# leaves no residue. NOT used for per-keystroke redraws.
+_tty_clear() { printf '\e[2J\e[H' > "$TTY"; }
+
+# Repaint a frame in place, flicker-free. Blanking the screen each keystroke
+# (\e[2J) shows an empty frame between erase and redraw — that's the flicker.
+# Instead we home the cursor and overwrite: each line clears to its own end as
+# it's rewritten (\e[K, so a shorter new line erases the old tail), and \e[J at
+# the end wipes any leftover lines from a taller previous frame. One write.
+paint() {
+  local frame="$1"
+  printf '\e[H%s\e[K\e[J' "${frame//$'\n'/$'\e[K'$'\n'}" > "$TTY"
+}
+
+# Read one logical keypress from the tty into REPLY: up down enter space q esc,
+# or the literal character otherwise. Decodes the common arrow-key escape
+# sequences (ESC [ A/B/C/D).
+_read_key() {
+  local c rest
+  IFS= read -rsn1 c < "$TTY" || { REPLY=q; return 0; }
+  case "$c" in
+    $'\e')
+      read -rsn2 -t 0.01 rest < "$TTY" || rest=""
+      case "$rest" in
+        '[A') REPLY=up ;;
+        '[B') REPLY=down ;;
+        '[C') REPLY=right ;;
+        '[D') REPLY=left ;;
+        '')   REPLY=esc ;;
+        *)    REPLY=other ;;
+      esac
+      ;;
+    ''|$'\r'|$'\n') REPLY=enter ;;
+    ' ')            REPLY=space ;;
+    *)              REPLY="$c" ;;
+  esac
+  return 0
+}
+
+# Echo every local branch across all source repos, de-duplicated, sorted.
+collect_all_local_branches() {
+  local repo
+  for repo in "${REPOS[@]}"; do
+    git -C "$(source_dir "$repo")" for-each-ref --format='%(refname:short)' \
+      refs/heads 2>/dev/null
+  done | sort -u
+}
+
+# A generic vertical menu over the items passed after the title. Renders to the
+# tty with a scrolling viewport, sets REPLY to the chosen 0-based index and
+# returns 0, or returns 1 if cancelled (q/Esc).
+_menu_select() {
+  local title="$1"; shift
+  local items=("$@")
+  local n=${#items[@]} sel=0 off=0 vis=15 i pre
+  _tty_clear
+  while :; do
+    if (( sel < off )); then off=$sel; fi
+    if (( sel >= off + vis )); then off=$(( sel - vis + 1 )); fi
+    paint "$(
+      printf '%s  %s%s\n\n' "$P_BOLD" "$title" "$P_RESET"
+      if (( off > 0 )); then printf '  %s↑ more%s\n' "$P_DIM" "$P_RESET"; fi
+      for (( i = off; i < off + vis && i < n; i++ )); do
+        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+        printf '%s%s\n' "$pre" "${items[$i]}"
+      done
+      if (( off + vis < n )); then printf '  %s↓ more%s\n' "$P_DIM" "$P_RESET"; fi
+      printf '\n  %s↑/↓%s move  %s⏎%s select  %sq%s cancel\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+    )"
+    _read_key
+    case "$REPLY" in
+      up|k)   sel=$(( (sel - 1 + n) % n )) ;;
+      down|j) sel=$(( (sel + 1) % n )) ;;
+      enter)  REPLY=$sel; return 0 ;;
+      q|esc)  return 1 ;;
+    esac
+  done
+}
+
+# Confirmation dialog for removing <group>. Two toggleable rows map to rm's
+# --force flags (both off by default), plus Remove / Cancel actions. On confirm,
+# runs `cmd_rm` (output routed to the tty) and returns 0; returns 1 on cancel.
+confirm_remove() {
+  local name="$1"
+  local fwt=0 fbr=0 sel=0 i pre box
+  # Rows: 0,1 = the two toggles; 2 = Remove; 3 = Cancel.
+  _tty_clear
+  while :; do
+    paint "$(
+      printf '%s⚠  Remove worktree group %s%s%s%s\n\n' \
+        "$P_RED$P_BOLD" "$P_YELLOW$name" "$P_RESET" "$P_RED$P_BOLD" "$P_RESET"
+      printf '%s   Deletes the worktree dirs in every repo AND their branches.%s\n\n' \
+        "$P_DIM" "$P_RESET"
+
+      for i in 0 1; do
+        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+        if (( i == 0 )); then
+          if (( fwt == 1 )); then box="${P_GREEN}[x]${P_RESET}"; else box='[ ]'; fi
+          printf '%s%s %s--force-rm-worktree%s   %sremove even with uncommitted changes%s\n' \
+            "$pre" "$box" "$P_BOLD" "$P_RESET" "$P_DIM" "$P_RESET"
+        else
+          if (( fbr == 1 )); then box="${P_GREEN}[x]${P_RESET}"; else box='[ ]'; fi
+          printf '%s%s %s--force-rm-branch%s     %sdelete even with unmerged commits%s\n' \
+            "$pre" "$box" "$P_BOLD" "$P_RESET" "$P_DIM" "$P_RESET"
+        fi
+      done
+      printf '\n'
+      if (( sel == 2 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s  Remove  %s\n' "$pre" "$P_RED$P_BOLD" "$P_RESET"
+      if (( sel == 3 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s  Cancel  %s\n' "$pre" "$P_BOLD" "$P_RESET"
+      printf '\n  %s↑/↓%s move  %sspace%s toggle  %s⏎%s confirm  %sq%s cancel\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+    )"
+
+    _read_key
+    case "$REPLY" in
+      up|k)   sel=$(( (sel - 1 + 4) % 4 )) ;;
+      down|j) sel=$(( (sel + 1) % 4 )) ;;
+      space)
+        if (( sel == 0 )); then fwt=$(( 1 - fwt )); fi
+        if (( sel == 1 )); then fbr=$(( 1 - fbr )); fi
+        ;;
+      enter)
+        case "$sel" in
+          0) fwt=$(( 1 - fwt )) ;;
+          1) fbr=$(( 1 - fbr )) ;;
+          2)
+            local flags=()
+            if (( fwt == 1 )); then flags+=(--force-rm-worktree); fi
+            if (( fbr == 1 )); then flags+=(--force-rm-branch); fi
+            printf '\e[2J\e[H' > "$TTY"
+            ( cmd_rm "$name" "${flags[@]}" ) > "$TTY" 2>&1 || true
+            printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
+            _read_key
+            return 0
+            ;;
+          3) return 1 ;;
+        esac
+        ;;
+      q|esc) return 1 ;;
+    esac
+  done
+}
+
+# Show a one-line abort message in the create flow, then wait for a keypress.
+_create_abort() {
+  printf '\n%s  %s%s\n%s  Press any key…%s' \
+    "$P_RED" "$1" "$P_RESET" "$P_DIM" "$P_RESET" > "$TTY"
+  _read_key
+}
+
+# Prompt for a new group name and optional base branch, then run `cmd_init`.
+# On success, sets NEW_PATH to the created group's path and returns 0; returns
+# 1 if cancelled or init failed.
+create_flow() {
+  NEW_PATH=""
+  printf '\e[2J\e[H\e[?25h' > "$TTY"   # show cursor for line input
+  {
+    printf '%s  Create a new worktree group%s\n\n' "$P_BOLD" "$P_RESET"
+    printf '%s  Leave the name empty to cancel.%s\n\n' "$P_DIM" "$P_RESET"
+    printf '  Name: '
+  } > "$TTY"
+
+  local name
+  IFS= read -r name < "$TTY" || { printf '\e[?25l' > "$TTY"; return 1; }
+  name="${name#"${name%%[![:space:]]*}"}"   # ltrim
+  name="${name%"${name##*[![:space:]]}"}"   # rtrim
+  printf '\e[?25l' > "$TTY"
+  [[ -n "$name" ]] || return 1
+
+  # Strict allowlist: a group name maps to a directory and a branch in five
+  # repos, so keep it to characters that are unambiguous in both. Reject
+  # anything else (slashes, spaces, …) rather than letting cmd_init create a
+  # malformed nested dir.
+  if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    _create_abort "Invalid name '$name' — use only letters, digits, . _ -"
+    return 1
+  fi
+  if [[ -d "$(group_dir "$name")" ]]; then
+    _create_abort "A group named '$name' already exists."
+    return 1
+  fi
+
+  # Base branch: a navigable menu of every local branch across all repos, with
+  # the default base pinned at the top.
+  local branches=() b
+  while IFS= read -r b; do branches+=("$b"); done < <(collect_all_local_branches)
+
+  local base=""
+  if ! _menu_select "Base branch for '$name'" \
+       "(default: $DEFAULT_BASE)" "${branches[@]}"; then
+    return 1
+  fi
+  if (( REPLY > 0 )); then base="${branches[$(( REPLY - 1 ))]}"; fi
+
+  printf '\e[2J\e[H' > "$TTY"
+  if ( cmd_init "$name" ${base:+"$base"} ) > "$TTY" 2>&1; then
+    NEW_PATH="$(group_dir "$name")"
+    printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
+    _read_key
+    return 0
+  fi
+  printf '\n%s  init failed — press any key…%s' "$P_RED" "$P_RESET" > "$TTY"
+  _read_key
+  return 1
+}
+
+# Main picker loop. Lists existing groups plus a trailing "create" row. On
+# selecting a group it prints that group's path to stdout (for the Fish wrapper
+# to cd into) and returns; the create row runs create_flow and prints the new
+# path; `d` removes the highlighted group in place.
+# Refresh WT_GROUPS and the parallel WT_SUMMARIES (off-branch summary per group).
+# Summaries are computed here — once per list change — rather than in the render
+# path, so navigation keystrokes don't spawn git per group on every repaint.
+_picker_refresh() {
+  collect_groups
+  WT_SUMMARIES=()
+  local g
+  for g in "${WT_GROUPS[@]}"; do
+    WT_SUMMARIES+=("$(group_offbranch_summary "$g")")
+  done
+}
+
+picker_loop() {
+  trap '_tty_restore' EXIT INT TERM
+  _tty_setup
+  _tty_clear
+
+  _picker_refresh
+  local sel=0 total i pre
+
+  while :; do
+    total=$(( ${#WT_GROUPS[@]} + 1 ))         # +1 for the trailing create row
+    if (( sel < 0 )); then sel=0; fi
+    if (( sel >= total )); then sel=$(( total - 1 )); fi
+
+    paint "$(
+      printf '%s  Worktrees%s\n\n' "$P_BOLD" "$P_RESET"
+      if (( ${#WT_GROUPS[@]} == 0 )); then
+        printf '%s  No worktree groups yet.%s\n\n' "$P_DIM" "$P_RESET"
+      fi
+      for i in "${!WT_GROUPS[@]}"; do
+        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+        if [[ -n "${WT_SUMMARIES[$i]}" ]]; then
+          printf '%s%s   %s⚠ %s%s\n' "$pre" "${WT_GROUPS[$i]}" "$P_YELLOW" "${WT_SUMMARIES[$i]}" "$P_RESET"
+        else
+          printf '%s%s\n' "$pre" "${WT_GROUPS[$i]}"
+        fi
+      done
+      if (( sel == ${#WT_GROUPS[@]} )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s＋ Create new worktree…%s\n' "$pre" "$P_GREEN" "$P_RESET"
+      printf '\n  %s↑/↓%s move  %s⏎%s open  %s d %s remove  %s q %s quit\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+    )"
+
+    _read_key
+    case "$REPLY" in
+      up|k)   sel=$(( sel - 1 )) ;;
+      down|j) sel=$(( sel + 1 )) ;;
+      enter)
+        if (( sel == ${#WT_GROUPS[@]} )); then
+          if create_flow; then
+            _tty_restore; trap - EXIT INT TERM
+            printf '%s\n' "$NEW_PATH"
+            return 0
+          fi
+          _tty_clear
+          _picker_refresh
+        else
+          _tty_restore; trap - EXIT INT TERM
+          printf '%s\n' "$(group_dir "${WT_GROUPS[$sel]}")"
+          return 0
+        fi
+        ;;
+      d)
+        if (( sel < ${#WT_GROUPS[@]} )); then
+          confirm_remove "${WT_GROUPS[$sel]}" || true
+          _tty_clear
+          _picker_refresh
+          if (( sel > ${#WT_GROUPS[@]} )); then sel=${#WT_GROUPS[@]}; fi
+        fi
+        ;;
+      q|esc)
+        _tty_restore; trap - EXIT INT TERM
+        return 0
+        ;;
+    esac
+  done
 }
 
 
@@ -1025,7 +1371,7 @@ Coordinated multi-repo git worktrees
 Usage:
   worktrees init <name> [<base>] [--fetch]                     Create a worktree group (alias: create)
   worktrees switch [<name>]                                    Switch to a group; no <name> → latest (alias: go)
-  worktrees ls                                                 List existing groups
+  worktrees ls                                                 List groups (interactive picker on a TTY via the Fish wrapper)
   worktrees status [<name>]                                    List repos with local changes (alias: st)
   worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]
                                                                Remove a group: worktree dirs + branches
