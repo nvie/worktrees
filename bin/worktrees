@@ -766,8 +766,9 @@ _menu_select() {
 # runs `cmd_rm` (output routed to the tty) and returns 0; returns 1 on cancel.
 confirm_remove() {
   local name="$1"
-  local fwt=0 fbr=0 sel=0 i pre box
+  local fwt=0 fbr=0 sel=2 i pre box
   # Rows: 0,1 = the two toggles; 2 = Remove; 3 = Cancel.
+  # Open focused on Remove so a plain d→⏎ is the fast path.
   _tty_clear
   while :; do
     paint "$(
