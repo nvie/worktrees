@@ -1,25 +1,44 @@
 # worktrees — fish-side companion. Sourced from ~/.config/fish/conf.d/.
 #
 # Drives behavior when a group's .envrc is loaded:
-#   $WORKTREE_GROUP     set → in a group
-#   $WORKTREE_ROOT      group dir
-#   $WORKTREE_COLOR_BG  hex (#RRGGBB) for OSC 11 terminal tint
+#   $WORKTREE_GROUP            set → in a group
+#   $WORKTREE_ROOT             group dir
+#   $WORKTREE_WORKSPACE        workspace the group belongs to
+#   $WORKTREE_WORKSPACE_ROOT   the project dir that workspace was resolved from
 
 
 # ─── wt_cd: group-aware cd helper ──────────────────────────────────────────
 #
-# Use in your cd* aliases like:
+# Takes a path relative to a group root — i.e. starting with a repo name — and
+# routes it to the group you're in, or to the source checkouts when you aren't:
+#
 #   function cdf;  wt_cd 'liveblocks-backend/apps/cloudflare'; end
 #   function cdbb; wt_cd 'liveblocks-backend';                  end
 #
-# When $WORKTREE_GROUP is set, routes into the group; otherwise into source.
+# Outside a group the source root comes from $worktrees_source_root if you've
+# set it, else from whichever workspace the current directory resolves to. Set
+# the variable next to aliases like the ones above — they belong to one project,
+# so they should keep working from anywhere, including from $HOME:
+#
+#   set -gx worktrees_source_root ~/Projects/liveblocks
 
 function wt_cd --argument-names rel
     if set -q WORKTREE_GROUP
         cd "$WORKTREE_ROOT/$rel"
-    else
-        cd "$HOME/Projects/liveblocks/$rel"
+        return
     end
+
+    if set -q worktrees_source_root
+        cd "$worktrees_source_root/$rel"
+        return
+    end
+
+    set -l src (command worktrees workspace --print-source-root 2>/dev/null)
+    if test -z "$src"
+        echo "wt_cd: not in a project, and \$worktrees_source_root is unset" >&2
+        return 1
+    end
+    cd "$src/$rel"
 end
 
 
@@ -46,7 +65,10 @@ end
 #   worktrees ls / list       →  interactive picker on a TTY; ⏎ cd's into the
 #                                chosen group, create's path is cd'd into too
 #
-# Everything else (rm / prune / -h / …) passes through.
+# All of it is scoped to the workspace the current directory resolves to, so
+# the same commands mean different repos in different projects.
+#
+# Everything else (add / rm / prune / workspace / -h / …) passes through.
 
 function worktrees
     set -l first $argv[1]
@@ -86,12 +108,24 @@ function worktrees
         case init create
             command worktrees $argv
             or return $status
+            # First positional arg is the group name. Skip flags, and skip the
+            # value of the flags that take one.
+            set -l skip_next 0
             for arg in $argv[2..-1]
-                if not string match -q -- '--*' $arg
-                    set -l target_path (command worktrees switch --print-path $arg 2>/dev/null)
-                    test -n "$target_path"; and cd "$target_path"
-                    return 0
+                if test $skip_next -eq 1
+                    set skip_next 0
+                    continue
                 end
+                if string match -q -- '--repos' $arg
+                    set skip_next 1
+                    continue
+                end
+                if string match -q -- '-*' $arg
+                    continue
+                end
+                set -l target_path (command worktrees switch --print-path $arg 2>/dev/null)
+                test -n "$target_path"; and cd "$target_path"
+                return 0
             end
             return 0
 

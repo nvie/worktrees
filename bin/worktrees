@@ -9,34 +9,14 @@ set -euo pipefail
 # ─── Configuration ──────────────────────────────────────────────────────────
 
 WORKTREES_DIR="${WORKTREES_DIR:-$HOME/Desktop/worktrees}"
-SOURCE_ROOT="${SOURCE_ROOT:-$HOME/Projects/liveblocks}"
-DEFAULT_BASE="${DEFAULT_BASE:-origin/main}"
 
-# Repos to include in every group. Order is preserved in output.
-REPOS=(
-  liveblocks
-  liveblocks-backend
-  admin
-  liveblocks.io
-  zenrouter
-)
-
-# Subdirs to include in CDPATH when inside a group, so `cd <something>`
-# resolves to this group's worktree first. Order here is the desired final
-# CDPATH order (after `.`); see write_envrc_if_missing for how path_add
-# reverse-builds it. The group root ($PWD) is appended last as a catch-all.
-CDPATH_SUBDIRS=(
-  "liveblocks/packages"
-  "liveblocks/tools"
-  "liveblocks-backend/apps"
-  "liveblocks-backend/shared"
-  "liveblocks-backend/tools"
-  "liveblocks"
-  "liveblocks-backend"
-)
+# Per-workspace config file, sourced as bash from the workspace root.
+# See load_workspace() for the keys it may set.
+WORKSPACE_CONF=".worktrees.conf"
 
 # 8-entry palette of subtle dark backgrounds, one per OSC 11 terminal tint.
-# A hash of the group name picks one; same name always lands on the same entry.
+# A hash of "<workspace>/<group>" picks one; the same pair always lands on the
+# same entry.
 PALETTE=(
   "#1a0d2e purple"
   "#0d1a2e blue"
@@ -51,9 +31,9 @@ PALETTE=(
 # Untracked/ignored files that should still travel into each worktree.
 # Basename glob match against `git status --ignored --porcelain` output.
 # Anything not matching is silently skipped (build artifacts, .DS_Store,
-# node_modules, etc. — the long tail). If you discover a file type that
-# should travel and currently doesn't, add a glob here.
-COPY_PATTERNS=(
+# node_modules, etc. — the long tail). Override per workspace with
+# `copy_patterns=(...)`.
+DEFAULT_COPY_PATTERNS=(
   ".env"
   ".env.*"
   "settings.local.json"
@@ -95,8 +75,9 @@ die()  { err "$*"; exit 1; }
 
 # ─── Path helpers ───────────────────────────────────────────────────────────
 
-group_dir()  { printf '%s/%s' "$WORKTREES_DIR" "$1"; }
-source_dir() { printf '%s/%s' "$SOURCE_ROOT"   "$1"; }
+workspace_dir() { printf '%s/%s'    "$WORKTREES_DIR" "${1:-$WORKSPACE}"; }
+group_dir()     { printf '%s/%s/%s' "$WORKTREES_DIR" "$WORKSPACE" "$1"; }
+source_dir()    { printf '%s/%s'    "$SOURCE_ROOT"   "$1"; }
 
 # Resolve the script's own dir, following symlinks (~/bin/worktrees → repo)
 script_dir() {
@@ -117,6 +98,275 @@ direnv_path_allowed() {
   local path="$1"
   local abspath; abspath=$(realpath "$path") || return 1
   grep -qFx -- "$abspath" "$HOME"/.local/share/direnv/allow/* 2>/dev/null
+}
+
+
+# ─── Workspace resolution ───────────────────────────────────────────────────
+#
+# A *workspace* is a named set of repos that belong together. A *group* is one
+# worktree instance of a workspace — one branch, one feature — and lives at
+#
+#   $WORKTREES_DIR/<workspace>/<group>/<repo>
+#
+# Which workspace you are in is derived from the current directory, so the same
+# binary does the right thing in ~/Projects/liveblocks and in ~/Projects/decoders.
+#
+# Resolution populates:
+#   WORKSPACE           name; also the directory under $WORKTREES_DIR
+#   WORKSPACE_ROOT      the project dir you cd into — the one holding
+#                       $WORKSPACE_CONF, or the repo itself when there is none
+#   SOURCE_ROOT         dir that $REPOS entries resolve against
+#   REPOS               repo directory names, in output order
+#   CDPATH_SUBDIRS      group-relative dirs to put on CDPATH inside a group
+#   COPY_PATTERNS       see DEFAULT_COPY_PATTERNS
+#   CLAUDE_MD_TEMPLATE  template used for a group's CLAUDE.md
+#   WS_DEFAULT_BASE     base branch override, if the workspace declares one
+
+WORKSPACE=""
+WORKSPACE_ROOT=""
+SOURCE_ROOT=""
+REPOS=()
+CDPATH_SUBDIRS=()
+COPY_PATTERNS=()
+CLAUDE_MD_TEMPLATE=""
+WS_DEFAULT_BASE=""
+WORKSPACE_OK=0
+
+# Walk up from <dir>, echoing the first ancestor that contains <needle>.
+find_up() {
+  local dir="$1" needle="$2"
+  while :; do
+    [[ -e "$dir/$needle" ]] && { printf '%s' "$dir"; return 0; }
+    [[ "$dir" == "/" ]] && return 1
+    dir=$(dirname "$dir")
+  done
+}
+
+# Echo the workspace root recorded under $WORKTREES_DIR/<workspace>, or fail.
+# This pointer is what makes a group self-describing: from anywhere inside
+# $WORKTREES_DIR we can find our way back to the project dir. It holds only a
+# path — repos and settings are always re-read from the live config.
+workspace_pointer() {
+  local f root
+  f="$(workspace_dir "$1")/.workspace"
+  [[ -f "$f" ]] && IFS= read -r root < "$f" && [[ -n "$root" ]] || return 1
+  printf '%s' "$root"
+}
+
+# Record the pointer for the current workspace, or verify the existing one.
+# Two projects resolving to the same name would otherwise silently share a
+# workspace dir; catch that here rather than after the worktrees are made.
+write_workspace_pointer() {
+  local dir existing
+  dir=$(workspace_dir)
+  if existing=$(workspace_pointer "$WORKSPACE"); then
+    [[ "$existing" == "$WORKSPACE_ROOT" ]] && return 0
+    err "Workspace name '$WORKSPACE' is already taken by $existing"
+    die "Set a different \`name=\` in $WORKSPACE_ROOT/$WORKSPACE_CONF."
+  fi
+  mkdir -p "$dir"
+  printf '%s\n' "$WORKSPACE_ROOT" > "$dir/.workspace"
+}
+
+# Populate the workspace globals from a project dir. A dir holding
+# $WORKSPACE_CONF describes a multi-repo workspace; any other dir is taken to
+# be a single repo that is its own workspace, which needs no config at all.
+load_workspace() {
+  local root="$1"
+  local name="" repos=() cdpath=() copy_patterns=() \
+        source_root="" default_base="" claude_md_template=""
+
+  WORKSPACE_ROOT="$root"
+
+  if [[ -f "$root/$WORKSPACE_CONF" ]]; then
+    # shellcheck source=/dev/null
+    source "$root/$WORKSPACE_CONF" || die "Failed to load $root/$WORKSPACE_CONF"
+    (( ${#repos[@]} > 0 )) || die "$root/$WORKSPACE_CONF declares no repos=(...)"
+    SOURCE_ROOT="${source_root:-$root}"
+    [[ "$SOURCE_ROOT" == /* ]] || SOURCE_ROOT="$root/$SOURCE_ROOT"
+    REPOS=("${repos[@]}")
+  else
+    [[ -e "$root/.git" ]] || return 1
+    SOURCE_ROOT=$(dirname "$root")
+    REPOS=("$(basename "$root")")
+  fi
+
+  WORKSPACE="${name:-$(basename "$root")}"
+  [[ "$WORKSPACE" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || die "Workspace name '$WORKSPACE' can't be a directory name. Set \`name=\` in $root/$WORKSPACE_CONF."
+
+  CDPATH_SUBDIRS=("${cdpath[@]}")
+  WS_DEFAULT_BASE="$default_base"
+
+  if (( ${#copy_patterns[@]} > 0 )); then
+    COPY_PATTERNS=("${copy_patterns[@]}")
+  else
+    COPY_PATTERNS=("${DEFAULT_COPY_PATTERNS[@]}")
+  fi
+
+  if [[ -z "$claude_md_template" ]]; then
+    CLAUDE_MD_TEMPLATE="$(share_dir)/CLAUDE.md.template"
+  elif [[ "$claude_md_template" == /* ]]; then
+    CLAUDE_MD_TEMPLATE="$claude_md_template"
+  else
+    CLAUDE_MD_TEMPLATE="$root/$claude_md_template"
+  fi
+
+  WORKSPACE_OK=1
+}
+
+# Resolve the workspace for the current directory. Returns 1 when there is
+# none — `ls` turns that into a workspace picker, everything else errors.
+#
+# Order matters twice over. Inside a group we must not fall through to the
+# `.git` search: every worktree has one, and a five-repo workspace would
+# resolve down to a single repo. And the $WORKSPACE_CONF search has to run all
+# the way to `/` before the `.git` search starts, or being in
+# ~/Projects/liveblocks/liveblocks-backend would find that repo's .git before
+# the workspace config one level up.
+resolve_workspace() {
+  local cwd rel ws root
+  cwd=$(pwd -P)
+
+  if [[ -n "${WORKTREE_WORKSPACE_ROOT:-}" ]] \
+     && load_workspace "$WORKTREE_WORKSPACE_ROOT"; then
+    return 0
+  fi
+
+  if [[ "$cwd/" == "$WORKTREES_DIR/"* ]]; then
+    rel="${cwd#"$WORKTREES_DIR"/}"
+    [[ "$rel" != "$cwd" ]] || return 1       # cwd is $WORKTREES_DIR itself
+    ws="${rel%%/*}"
+    [[ -n "$ws" ]] || return 1
+    root=$(workspace_pointer "$ws") \
+      || die "$(workspace_dir "$ws") has no .workspace pointer — can't tell which project it belongs to."
+    load_workspace "$root"
+    return
+  fi
+
+  if root=$(find_up "$cwd" "$WORKSPACE_CONF"); then
+    load_workspace "$root"
+    return
+  fi
+  # $HOME is a git repo on plenty of machines (dotfiles). Letting it become an
+  # implicit workspace would mean everywhere outside a real project resolves to
+  # it, instead of leaving `ls` free to offer a choice. An explicit
+  # $WORKSPACE_CONF in $HOME still wins — that search ran first.
+  if root=$(find_up "$cwd" ".git") && [[ "$root" != "$HOME" ]]; then
+    load_workspace "$root"
+    return
+  fi
+  return 1
+}
+
+# Every subcommand except `ls` needs a workspace, and none of them can guess.
+require_workspace() {
+  (( WORKSPACE_OK == 1 )) && return 0
+  err "Not inside a project."
+  err "cd into a git repo, or into a directory holding a $WORKSPACE_CONF, and retry."
+  exit 1
+}
+
+# Echo the names of every workspace that has groups on disk.
+collect_workspaces() {
+  WT_WORKSPACES=()
+  [[ -d "$WORKTREES_DIR" ]] || return 0
+  local d
+  while IFS= read -r d; do
+    [[ -f "$d/.workspace" ]] || continue
+    WT_WORKSPACES+=("$(basename "$d")")
+  done < <(find "$WORKTREES_DIR" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort)
+}
+
+# Base branch to create new branches from: $DEFAULT_BASE from the environment,
+# else `default_base=` from the workspace config, else derived from the first
+# repo. Deriving has to cope with clones that never set origin/HEAD and with
+# repos that have no remote at all, so it walks down to "wherever this repo
+# currently is" rather than assuming origin/main exists.
+DEFAULT_BASE_CACHE=""
+default_base() {
+  if [[ -z "$DEFAULT_BASE_CACHE" ]]; then
+    local b src ref cand
+    b="${DEFAULT_BASE:-$WS_DEFAULT_BASE}"
+    if [[ -z "$b" ]]; then
+      src=$(source_dir "${REPOS[0]}")
+
+      ref=$(git -C "$src" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) || ref=""
+      b="${ref#refs/remotes/}"
+
+      if [[ -z "$b" ]]; then
+        for cand in origin/main origin/master; do
+          if git -C "$src" rev-parse --verify --quiet "$cand" >/dev/null; then
+            b="$cand"; break
+          fi
+        done
+      fi
+
+      if [[ -z "$b" ]]; then
+        b=$(git -C "$src" rev-parse --abbrev-ref HEAD 2>/dev/null) || b=""
+      fi
+      [[ -n "$b" ]] || b="main"
+    fi
+    DEFAULT_BASE_CACHE="$b"
+  fi
+  printf '%s' "$DEFAULT_BASE_CACHE"
+}
+
+# Repos covered by the operation currently in flight. `init` sets it from the
+# requested selection, `add` from the widened group.
+GROUP_REPOS=()
+
+# Echo the repos that actually have a worktree in <group>, in workspace order.
+# A group's repo set is recorded nowhere but the directories on disk — that is
+# what lets a group cover a subset of the workspace, and lets `add` widen it
+# later without any bookkeeping to keep in sync.
+group_repos() {
+  local name="$1" repo
+  for repo in "${REPOS[@]}"; do
+    [[ -d "$(group_dir "$name")/$repo" ]] && printf '%s\n' "$repo"
+  done
+  return 0
+}
+
+# The group the current directory sits in: $WORKTREE_GROUP when direnv has
+# loaded the group's .envrc, otherwise derived from the path — so commands that
+# default to "the group I'm in" also work in a shell without direnv.
+current_group() {
+  if [[ -n "${WORKTREE_GROUP:-}" ]]; then
+    printf '%s' "$WORKTREE_GROUP"
+    return 0
+  fi
+  local cwd rel ws_dir
+  cwd=$(pwd -P)
+  ws_dir=$(workspace_dir)
+  rel="${cwd#"$ws_dir"/}"
+  [[ "$rel" != "$cwd" ]] || return 1
+  printf '%s' "${rel%%/*}"
+}
+
+# Where to land when switching into <group>: its first repo's worktree, not
+# the group root. The root is not a repo, so `git` there reports whatever
+# enclosing repo happens to exist (~/Desktop lives inside a dotfiles repo on
+# this machine), and the prompt shows a branch that has nothing to do with the
+# group. The group's .envrc still loads from a repo below it, via the
+# source_up_if_exists stub ensure_source_up writes.
+group_landing_dir() {
+  local name="$1" first
+  first=$(group_repos "$name")      # not `| head -1`: SIGPIPE trips pipefail
+  first="${first%%$'\n'*}"
+  if [[ -n "$first" ]]; then
+    printf '%s/%s' "$(group_dir "$name")" "$first"
+  else
+    group_dir "$name"
+  fi
+}
+
+repo_in_workspace() {
+  local want="$1" r
+  for r in "${REPOS[@]}"; do
+    [[ "$r" == "$want" ]] && return 0
+  done
+  return 1
 }
 
 
@@ -223,14 +473,16 @@ write_envrc_if_missing() {
   local target; target="$(group_dir "$name")/.envrc"
   [[ -f "$target" ]] && return 0
 
-  local bg; bg=$(palette_bg "$name")
+  local bg; bg=$(palette_bg "$WORKSPACE/$name")
   local today; today=$(date +%Y-%m-%d)
 
   {
-    echo "# Generated by \`worktrees $name\` on $today. Edit freely — re-runs leave this file alone. To refresh from template: \`rm .envrc && worktrees $name\`."
+    echo "# Generated by \`worktrees init $name\` on $today. Edit freely — re-runs leave this file alone. To refresh from template: \`rm .envrc && worktrees init $name\`."
     echo ""
     echo "export WORKTREE_GROUP=\"$name\""
     echo "export WORKTREE_ROOT=\"\$PWD\""
+    echo "export WORKTREE_WORKSPACE=\"$WORKSPACE\""
+    echo "export WORKTREE_WORKSPACE_ROOT=\"$WORKSPACE_ROOT\""
     echo ""
     echo "# OSC 11 terminal tint. Uncomment a different line to override."
     local entry hex color_name
@@ -244,6 +496,8 @@ write_envrc_if_missing() {
     echo ""
     echo "# Reset CDPATH, then rebuild: '.' first, group root, container subdirs."
     echo "# path_add prepends, so add in reverse order of desired final order."
+    echo "# Entries are workspace-wide; ones for repos this group doesn't cover"
+    echo "# simply never match, which is what keeps \`worktrees add\` cheap."
     echo "export CDPATH=\"\""
     echo "path_add CDPATH \"\$PWD\""
     local i
@@ -284,26 +538,37 @@ write_claude_md_if_missing() {
   local name="$1"
   local target; target="$(group_dir "$name")/CLAUDE.md"
   [[ -f "$target" ]] && return 0
+  [[ -f "$CLAUDE_MD_TEMPLATE" ]] || die "Template missing: $CLAUDE_MD_TEMPLATE"
 
-  local template="$(share_dir)/CLAUDE.md.template"
-  [[ -f "$template" ]] || die "Template missing: $template"
+  local bullets=() r
+  while IFS= read -r r; do bullets+=("- $r"); done < <(group_repos "$name")
 
-  local today; today=$(date +%Y-%m-%d)
-  sed -e "s|{{name}}|$name|g" -e "s|{{date}}|$today|g" "$template" > "$target"
+  local body; body=$(< "$CLAUDE_MD_TEMPLATE")
+  body="${body//\{\{name\}\}/$name}"
+  body="${body//\{\{date\}\}/$(date +%Y-%m-%d)}"
+  body="${body//\{\{workspace\}\}/$WORKSPACE}"
+  body="${body//\{\{group_dir\}\}/$(group_dir "$name")}"
+  body="${body//\{\{source_root\}\}/$SOURCE_ROOT}"
+  body="${body//\{\{count\}\}/${#bullets[@]}}"
+  body="${body//\{\{repos\}\}/$(printf '%s\n' "${bullets[@]}")}"
+  printf '%s\n' "$body" > "$target"
 }
 
 
 # ─── Claude per-worktree config ─────────────────────────────────────────────
 
-# Build a JSON array of paths to the four sibling worktrees of $repo.
+# Build a JSON array of paths to $repo's sibling worktrees in the group.
+# Reads $GROUP_REPOS rather than the directories on disk: during `init` the
+# siblings are still being created in parallel, so disk is not yet the record.
 siblings_json_array() {
   local repo="$1" name="$2"
   local group; group=$(group_dir "$name")
   local siblings=() r
-  for r in "${REPOS[@]}"; do
+  for r in "${GROUP_REPOS[@]}"; do
     [[ "$r" == "$repo" ]] && continue
     siblings+=("$group/$r")
   done
+  (( ${#siblings[@]} > 0 )) || { printf '[]'; return 0; }
   printf '%s\n' "${siblings[@]}" | jq -R . | jq -s .
 }
 
@@ -412,52 +677,21 @@ setup_one_repo() {
 }
 
 
-# ─── Subcommand: init ───────────────────────────────────────────────────────
+# ─── Group assembly: preflight / setup / finalize ───────────────────────────
 
-cmd_init() {
-  local name="" base="" do_fetch=0
-  while (( $# > 0 )); do
-    case "$1" in
-      --fetch) do_fetch=1 ;;
-      -*)      die "Unknown flag: $1" ;;
-      *)
-        if [[ -z "$name" ]];      then name="$1"
-        elif [[ -z "$base" ]];    then base="$1"
-        else die "Usage: worktrees init <name> [<base-branch>] [--fetch]"
-        fi
-        ;;
-    esac
-    shift
-  done
-  [[ -n "$name" ]] || die "Usage: worktrees init <name> [<base-branch>] [--fetch]"
+# Check that each of <repos...> can host branch <name> off <base>. Aborts on
+# the first class of problem found, so setup never starts half-viable.
+preflight_repos() {
+  local name="$1" base="$2"; shift 2
+  local repos=("$@") repo
 
-  # If no explicit base was passed, we default to $DEFAULT_BASE (origin/main).
-  # That remote ref needs to be up-to-date or we'd branch from stale state, so
-  # force a fetch in that case. With an explicit base, trust the caller.
-  if [[ -z "$base" ]]; then
-    base="$DEFAULT_BASE"
-    do_fetch=1
-  fi
-
-  # Pre-flight: source repos exist
-  local repo
-  for repo in "${REPOS[@]}"; do
+  for repo in "${repos[@]}"; do
     [[ -d "$(source_dir "$repo")/.git" ]] \
       || die "Source repo missing: $(source_dir "$repo")"
   done
 
-  # Pre-flight: fetch in each source (only if --fetch passed; skipped by
-  # default since it's the slow step and you usually already fetched recently)
-  if (( do_fetch == 1 )); then
-    step "Fetching: ${REPOS[*]}"
-    for repo in "${REPOS[@]}"; do
-      git -C "$(source_dir "$repo")" fetch --quiet
-    done
-  fi
-
-  # Pre-flight: base exists everywhere
   local missing=()
-  for repo in "${REPOS[@]}"; do
+  for repo in "${repos[@]}"; do
     if ! git -C "$(source_dir "$repo")" rev-parse --verify --quiet "$base" >/dev/null; then
       missing+=("$repo")
     fi
@@ -466,9 +700,8 @@ cmd_init() {
     die "Base '$base' missing in: ${missing[*]}. Pick a different base or create the branches first."
   fi
 
-  # Pre-flight: branch <name> not checked out OUTSIDE this group
   local conflicts=() other c
-  for repo in "${REPOS[@]}"; do
+  for repo in "${repos[@]}"; do
     if other=$(branch_conflict_outside_group "$repo" "$name"); then
       conflicts+=("$repo: $other")
     fi
@@ -478,15 +711,19 @@ cmd_init() {
     for c in "${conflicts[@]}"; do err "  $c"; done
     die "Switch those worktrees first."
   fi
+}
+
+# Create the worktrees for <repos...> in group <name>, branching off <base>.
+# State checks (HEALTHY skip, STALE cleanup, ORPHAN prune) and branch-plan
+# resolution run synchronously; the actual per-repo work goes in parallel.
+setup_repos() {
+  local name="$1" base="$2"; shift 2
+  local repos=("$@") repo state
 
   mkdir -p "$(group_dir "$name")"
 
-  # Per-repo setup. State checks (HEALTHY skip, STALE cleanup, ORPHAN prune)
-  # and branch-plan resolution run synchronously; the actual `setup_one_repo`
-  # work goes in parallel.
-  local state
   local pids=() started_repos=() logs=() annotations=() stale_warnings=()
-  for repo in "${REPOS[@]}"; do
+  for repo in "${repos[@]}"; do
     state=$(worktree_state "$repo" "$name")
     case "$state" in
       HEALTHY)
@@ -518,28 +755,34 @@ cmd_init() {
     pids+=($!)
   done
 
-  if (( ${#pids[@]} > 0 )); then
-    # Surface stale-origin warnings BEFORE the slow parallel work — gives the
-    # user a chance to Ctrl-C if reusing an outdated origin/<name> wasn't the
-    # intent.
-    if (( ${#stale_warnings[@]} > 0 )); then
-      local w
-      for w in "${stale_warnings[@]}"; do warn "$w"; done
+  (( ${#pids[@]} > 0 )) || return 0
+
+  # Surface stale-origin warnings BEFORE the slow parallel work — gives the
+  # user a chance to Ctrl-C if reusing an outdated origin/<name> wasn't the
+  # intent.
+  local w
+  for w in "${stale_warnings[@]}"; do warn "$w"; done
+
+  step "Setting up worktrees in parallel: ${started_repos[*]}"
+  local i any_failed=0
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      ok "${started_repos[$i]} — $(format_branch_annotation "${annotations[$i]}")"
+    else
+      err "${started_repos[$i]} failed:"
+      cat "${logs[$i]}" >&2
+      any_failed=1
     fi
-    step "Setting up worktrees in parallel: ${started_repos[*]}"
-    local i any_failed=0
-    for i in "${!pids[@]}"; do
-      if wait "${pids[$i]}"; then
-        ok "${started_repos[$i]} — $(format_branch_annotation "${annotations[$i]}")"
-      else
-        err "${started_repos[$i]} failed:"
-        cat "${logs[$i]}" >&2
-        any_failed=1
-      fi
-      rm -f "${logs[$i]}"
-    done
-    (( any_failed == 1 )) && die "One or more worktrees failed to set up. \`rm -rf $(group_dir "$name")\` and re-run."
-  fi
+    rm -f "${logs[$i]}"
+  done
+  (( any_failed == 1 )) && die "One or more worktrees failed to set up. \`rm -rf $(group_dir "$name")\` and re-run."
+  return 0
+}
+
+# Write the group-level files and settle direnv for <repos...>.
+finalize_group() {
+  local name="$1"; shift
+  local repos=("$@") repo wt src relpath
 
   write_envrc_if_missing "$name"
   write_claude_md_if_missing "$name"
@@ -559,9 +802,9 @@ cmd_init() {
   #    differs from source) fails (a) and is NOT auto-allowed.
   direnv allow "$(group_dir "$name")" >/dev/null 2>&1 || true
   step "Pre-allowing direnv where source content matches and is already trusted"
-  for repo in "${REPOS[@]}"; do
-    local wt="$(group_dir "$name")/$repo"
-    local src; src=$(source_dir "$repo")
+  for repo in "${repos[@]}"; do
+    wt="$(group_dir "$name")/$repo"
+    src=$(source_dir "$repo")
     [[ -d "$wt" ]] || continue
     while IFS= read -r relpath; do
       [[ -n "$relpath" ]] || continue
@@ -579,16 +822,142 @@ cmd_init() {
   # .envrc gets allowed first; this step then patches if needed and
   # re-allows the patched file.
   step "Ensuring each worktree's .envrc inherits group vars (source_up_if_exists)"
-  for repo in "${REPOS[@]}"; do
-    local wt="$(group_dir "$name")/$repo"
+  for repo in "${repos[@]}"; do
+    wt="$(group_dir "$name")/$repo"
     [[ -d "$wt" ]] || continue
     ensure_source_up "$wt"
   done
+}
+
+
+# ─── Subcommand: init ───────────────────────────────────────────────────────
+
+cmd_init() {
+  local name="" base="" do_fetch=0 repo_csv=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --fetch)   do_fetch=1 ;;
+      --repos=*) repo_csv="${1#--repos=}" ;;
+      --repos)
+        shift || true
+        repo_csv="${1:-}"
+        [[ -n "$repo_csv" ]] || die "--repos needs a comma-separated list of repos"
+        ;;
+      -*)      die "Unknown flag: $1" ;;
+      *)
+        if [[ -z "$name" ]];      then name="$1"
+        elif [[ -z "$base" ]];    then base="$1"
+        else die "Usage: worktrees init <name> [<base-branch>] [--repos a,b] [--fetch]"
+        fi
+        ;;
+    esac
+    shift
+  done
+  [[ -n "$name" ]] || die "Usage: worktrees init <name> [<base-branch>] [--repos a,b] [--fetch]"
+
+  write_workspace_pointer
+
+  # If no explicit base was passed, we default to the workspace's base. That
+  # remote ref needs to be up-to-date or we'd branch from stale state, so force
+  # a fetch in that case. With an explicit base, trust the caller.
+  if [[ -z "$base" ]]; then
+    base=$(default_base)
+    do_fetch=1
+  fi
+
+  # Which repos this group covers. An explicit --repos wins; otherwise a group
+  # that already exists keeps to the repos it already has (so a repair run
+  # can't silently widen it), and a fresh one covers the whole workspace.
+  local r
+  if [[ -n "$repo_csv" ]]; then
+    IFS=',' read -r -a GROUP_REPOS <<< "$repo_csv"
+    for r in "${GROUP_REPOS[@]}"; do
+      repo_in_workspace "$r" \
+        || die "Not a repo in workspace '$WORKSPACE': $r (have: ${REPOS[*]})"
+    done
+  elif [[ -d "$(group_dir "$name")" ]]; then
+    GROUP_REPOS=()
+    while IFS= read -r r; do GROUP_REPOS+=("$r"); done < <(group_repos "$name")
+    (( ${#GROUP_REPOS[@]} > 0 )) || GROUP_REPOS=("${REPOS[@]}")
+  else
+    GROUP_REPOS=("${REPOS[@]}")
+  fi
+
+  if (( do_fetch == 1 )); then
+    step "Fetching: ${GROUP_REPOS[*]}"
+    local repo src
+    for repo in "${GROUP_REPOS[@]}"; do
+      src=$(source_dir "$repo")
+      # Nothing to fetch without a remote, and `git fetch` errors out rather
+      # than shrugging.
+      [[ -n "$(git -C "$src" remote 2>/dev/null)" ]] || continue
+      git -C "$src" fetch --quiet
+    done
+  fi
+
+  preflight_repos "$name" "$base" "${GROUP_REPOS[@]}"
+  setup_repos     "$name" "$base" "${GROUP_REPOS[@]}"
+  finalize_group  "$name"         "${GROUP_REPOS[@]}"
 
   ok "Created: $(group_dir "$name")"
   info ""
   info "Next:"
-  info "  cd $(group_dir "$name")"
+  info "  cd $(group_landing_dir "$name")"
+}
+
+
+# ─── Subcommand: add ────────────────────────────────────────────────────────
+#
+# Widen an existing group by one or more repos — the escape hatch for "turns
+# out I need admin after all". Because a group's repo set is just the dirs on
+# disk, this is the same per-repo setup `init` does, plus a refresh of every
+# sibling's Claude config so they all see each other again.
+
+cmd_add() {
+  local base="" repos=() name
+  name=$(current_group || true)
+  while (( $# > 0 )); do
+    case "$1" in
+      --group) shift || true; name="${1:-}"; [[ -n "$name" ]] || die "--group needs a name" ;;
+      --base)  shift || true; base="${1:-}"; [[ -n "$base" ]] || die "--base needs a branch" ;;
+      -*)      die "Unknown flag: $1" ;;
+      *)       repos+=("$1") ;;
+    esac
+    shift
+  done
+
+  (( ${#repos[@]} > 0 )) \
+    || die "Usage: worktrees add <repo>... [--group <name>] [--base <branch>]"
+  [[ -n "$name" ]] || die "Not inside a worktree group — pass --group <name>."
+  [[ -d "$(group_dir "$name")" ]] || die "No such group: $name"
+
+  local r
+  for r in "${repos[@]}"; do
+    if ! repo_in_workspace "$r"; then
+      die "Not a repo in workspace '$WORKSPACE': $r (have: ${REPOS[*]})"
+    fi
+    if [[ -d "$(group_dir "$name")/$r" ]]; then
+      die "$r is already in group '$name'."
+    fi
+  done
+
+  [[ -n "$base" ]] || base=$(default_base)
+
+  # Siblings must reflect the *widened* group, so compute them before setup.
+  GROUP_REPOS=()
+  while IFS= read -r r; do GROUP_REPOS+=("$r"); done < <(group_repos "$name")
+  GROUP_REPOS+=("${repos[@]}")
+
+  preflight_repos "$name" "$base" "${repos[@]}"
+  setup_repos     "$name" "$base" "${repos[@]}"
+  finalize_group  "$name"         "${repos[@]}"
+
+  # The repos that were already here now have stale additionalDirectories.
+  for r in "${GROUP_REPOS[@]}"; do
+    setup_claude_config "$r" "$name"
+  done
+
+  ok "Added to $name: ${repos[*]}"
 }
 
 
@@ -597,20 +966,21 @@ cmd_init() {
 # Populate the global WT_GROUPS array with existing group names, alphabetical.
 collect_groups() {
   WT_GROUPS=()
-  [[ -d "$WORKTREES_DIR" ]] || return 0
+  local dir; dir=$(workspace_dir)
+  [[ -d "$dir" ]] || return 0
   local d
   while IFS= read -r d; do
     WT_GROUPS+=("$(basename "$d")")
-  done < <(find "$WORKTREES_DIR" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort)
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort)
 }
 
 # Echo a short summary of <group>'s off-branch worktrees, or nothing if every
 # worktree is on its own branch.
 group_offbranch_summary() {
-  local name="$1" repo wt branch off=()
-  for repo in "${REPOS[@]}"; do
+  local name="$1" repo wt branch off=() present=0
+  while IFS= read -r repo; do
+    present=$(( present + 1 ))
     wt="$(group_dir "$name")/$repo"
-    [[ -d "$wt" ]] || continue
     branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || {
       off+=("$repo:no-git")
       continue
@@ -620,9 +990,9 @@ group_offbranch_summary() {
     elif [[ "$branch" != "$name" ]]; then
       off+=("${repo}→${branch}")
     fi
-  done
+  done < <(group_repos "$name")
   (( ${#off[@]} > 0 )) && printf '%d of %d worktrees off-branch (%s)' \
-    "${#off[@]}" "${#REPOS[@]}" "${off[*]}"
+    "${#off[@]}" "$present" "${off[*]}"
   return 0
 }
 
@@ -640,6 +1010,19 @@ cmd_ls() {
   if (( interactive == 1 )); then
     picker_loop
     return
+  fi
+
+  # Non-interactive and no workspace in scope: there is nothing sensible to
+  # list, but naming the workspaces that do exist beats a bare error.
+  if (( WORKSPACE_OK == 0 )); then
+    err "Not inside a project — can't tell which workspace to list."
+    collect_workspaces
+    if (( ${#WT_WORKSPACES[@]} > 0 )); then
+      printf '\nKnown workspaces:\n' >&2
+      local w
+      for w in "${WT_WORKSPACES[@]}"; do printf '  %s\n' "$w" >&2; done
+    fi
+    exit 1
   fi
 
   collect_groups
@@ -761,6 +1144,67 @@ _menu_select() {
   done
 }
 
+# A multi-select over <items...>: space toggles, `a`/`n` select all/none, ⏎
+# confirms. Everything starts selected. Sets REPLY to the chosen items,
+# space-separated, and returns 0; returns 1 if cancelled.
+_menu_multiselect() {
+  local title="$1"; shift
+  local items=("$@")
+  local n=${#items[@]} sel=0 i pre box
+  local marks=() chosen=()
+  for (( i = 0; i < n; i++ )); do marks[i]=1; done
+  _tty_clear
+  while :; do
+    paint "$(
+      printf '%s  %s%s\n\n' "$P_BOLD" "$title" "$P_RESET"
+      for (( i = 0; i < n; i++ )); do
+        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+        if (( marks[i] == 1 )); then box="${P_GREEN}[x]${P_RESET}"; else box='[ ]'; fi
+        printf '%s%s %s\n' "$pre" "$box" "${items[$i]}"
+      done
+      printf '\n  %s↑/↓%s move  %sspace%s toggle  %sa%s all  %sn%s none  %s⏎%s confirm  %sq%s cancel\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+    )"
+    _read_key
+    case "$REPLY" in
+      up|k)   sel=$(( (sel - 1 + n) % n )) ;;
+      down|j) sel=$(( (sel + 1) % n )) ;;
+      space)  marks[sel]=$(( 1 - marks[sel] )) ;;
+      a)      for (( i = 0; i < n; i++ )); do marks[i]=1; done ;;
+      n)      for (( i = 0; i < n; i++ )); do marks[i]=0; done ;;
+      enter)
+        chosen=()
+        for (( i = 0; i < n; i++ )); do
+          if (( marks[i] == 1 )); then chosen+=("${items[$i]}"); fi
+        done
+        (( ${#chosen[@]} > 0 )) || continue     # nothing selected is not a group
+        REPLY="${chosen[*]}"
+        return 0
+        ;;
+      q|esc) return 1 ;;
+    esac
+  done
+}
+
+# Choose among the workspaces that have groups on disk, and load the winner.
+# This is what `worktrees ls` falls back to when the cwd implies no workspace,
+# and what `w` in the group picker jumps to.
+workspace_picker() {
+  collect_workspaces
+  if (( ${#WT_WORKSPACES[@]} == 0 )); then
+    _create_abort "No workspaces yet — cd into a project and create a group."
+    return 1
+  fi
+  local labels=() w root
+  for w in "${WT_WORKSPACES[@]}"; do
+    root=$(workspace_pointer "$w") || root="?"
+    labels+=("$(printf '%-24s %s%s%s' "$w" "$P_DIM" "${root/#$HOME/\~}" "$P_RESET")")
+  done
+  _menu_select "Which workspace?" "${labels[@]}" || return 1
+  load_workspace "$(workspace_pointer "${WT_WORKSPACES[$REPLY]}")"
+}
+
 # Confirmation dialog for removing <group>. Two toggleable rows map to rm's
 # --force flags (both off by default), plus Remove / Cancel actions. On confirm,
 # runs `cmd_rm` (output routed to the tty) and returns 0; returns 1 on cancel.
@@ -867,6 +1311,15 @@ create_flow() {
     return 1
   fi
 
+  # Repo selection. A group may cover a subset of the workspace — you usually
+  # know up front which repos a feature will touch, and leaving the rest out
+  # keeps the group small. `worktrees add` widens it later if you were wrong.
+  local chosen_repos=("${REPOS[@]}")
+  if (( ${#REPOS[@]} > 1 )); then
+    _menu_multiselect "Repos for '$name'" "${REPOS[@]}" || return 1
+    read -r -a chosen_repos <<< "$REPLY"
+  fi
+
   # Base branch: a navigable menu of every local branch across all repos, with
   # the default base pinned at the top.
   local branches=() b
@@ -874,14 +1327,16 @@ create_flow() {
 
   local base=""
   if ! _menu_select "Base branch for '$name'" \
-       "(default: $DEFAULT_BASE)" "${branches[@]}"; then
+       "(default: $(default_base))" "${branches[@]}"; then
     return 1
   fi
   if (( REPLY > 0 )); then base="${branches[$(( REPLY - 1 ))]}"; fi
 
+  local repo_csv; repo_csv=$(IFS=,; printf '%s' "${chosen_repos[*]}")
+
   printf '\e[2J\e[H' > "$TTY"
-  if ( cmd_init "$name" ${base:+"$base"} ) > "$TTY" 2>&1; then
-    NEW_PATH="$(group_dir "$name")"
+  if ( cmd_init "$name" ${base:+"$base"} --repos "$repo_csv" ) > "$TTY" 2>&1; then
+    NEW_PATH="$(group_landing_dir "$name")"
     printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
     _read_key
     return 0
@@ -912,6 +1367,12 @@ picker_loop() {
   _tty_setup
   _tty_clear
 
+  # Started from somewhere that implies no workspace: ask instead of erroring.
+  if (( WORKSPACE_OK == 0 )) && ! workspace_picker; then
+    _tty_restore; trap - EXIT INT TERM
+    return 0
+  fi
+
   _picker_refresh
   local sel=0 total i pre
 
@@ -921,7 +1382,7 @@ picker_loop() {
     if (( sel >= total )); then sel=$(( total - 1 )); fi
 
     paint "$(
-      printf '%s  Worktrees%s\n\n' "$P_BOLD" "$P_RESET"
+      printf '%s  Worktrees%s  %s%s%s\n\n' "$P_BOLD" "$P_RESET" "$P_DIM" "$WORKSPACE" "$P_RESET"
       if (( ${#WT_GROUPS[@]} == 0 )); then
         printf '%s  No worktree groups yet.%s\n\n' "$P_DIM" "$P_RESET"
       fi
@@ -935,8 +1396,9 @@ picker_loop() {
       done
       if (( sel == ${#WT_GROUPS[@]} )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
       printf '%s%s＋ Create new worktree…%s\n' "$pre" "$P_GREEN" "$P_RESET"
-      printf '\n  %s↑/↓%s move  %s⏎%s open  %s d %s remove  %s q %s quit\n' \
-        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+      printf '\n  %s↑/↓%s move  %s⏎%s open  %s d %s remove  %s w %s workspace  %s q %s quit\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
     )"
 
     _read_key
@@ -954,7 +1416,7 @@ picker_loop() {
           _picker_refresh
         else
           _tty_restore; trap - EXIT INT TERM
-          printf '%s\n' "$(group_dir "${WT_GROUPS[$sel]}")"
+          printf '%s\n' "$(group_landing_dir "${WT_GROUPS[$sel]}")"
           return 0
         fi
         ;;
@@ -965,6 +1427,12 @@ picker_loop() {
           _picker_refresh
           if (( sel > ${#WT_GROUPS[@]} )); then sel=${#WT_GROUPS[@]}; fi
         fi
+        ;;
+      w)
+        workspace_picker || true
+        _tty_clear
+        _picker_refresh
+        sel=0
         ;;
       q|esc)
         _tty_restore; trap - EXIT INT TERM
@@ -990,7 +1458,7 @@ picker_loop() {
 # .envrc). Exits 0 if every repo is clean on both axes, 1 if any aren't.
 
 cmd_status() {
-  local name="${1:-${WORKTREE_GROUP:-}}"
+  local name="${1:-$(current_group || true)}"
   [[ -n "$name" ]] || die "Usage: worktrees status [<name>] (or run from inside a group)"
   local group; group=$(group_dir "$name")
   [[ -d "$group" ]] || die "No such group: $name"
@@ -1044,23 +1512,24 @@ cmd_switch() {
     exit 2
   fi
 
+  local ws_dir; ws_dir=$(workspace_dir)
   if [[ -z "$name" ]]; then
-    [[ -d "$WORKTREES_DIR" ]] || die "No worktree groups yet (WORKTREES_DIR=$WORKTREES_DIR)."
-    name=$(ls -t "$WORKTREES_DIR" 2>/dev/null | grep -v '^\.' | head -n 1)
-    [[ -n "$name" ]] || die "No worktree groups yet (WORKTREES_DIR=$WORKTREES_DIR)."
+    [[ -d "$ws_dir" ]] || die "No worktree groups yet in workspace '$WORKSPACE' ($ws_dir)."
+    name=$(ls -t "$ws_dir" 2>/dev/null | grep -v '^\.' | head -n 1)
+    [[ -n "$name" ]] || die "No worktree groups yet in workspace '$WORKSPACE' ($ws_dir)."
   fi
   local group; group=$(group_dir "$name")
   if [[ ! -d "$group" ]]; then
-    err "No such group: $name"
+    err "No such group in workspace '$WORKSPACE': $name"
     local existing=""
-    [[ -d "$WORKTREES_DIR" ]] && existing=$(ls -1 "$WORKTREES_DIR" 2>/dev/null | grep -v '^\.' || true)
+    [[ -d "$ws_dir" ]] && existing=$(ls -1 "$ws_dir" 2>/dev/null | grep -v '^\.' || true)
     if [[ -n "$existing" ]]; then
       printf '\nExisting worktrees:\n' >&2
       while IFS= read -r g; do printf '  %s\n' "$g" >&2; done <<< "$existing"
     fi
     exit 1
   fi
-  printf '%s\n' "$group"
+  printf '%s\n' "$(group_landing_dir "$name")"
 }
 
 
@@ -1088,6 +1557,7 @@ cmd_prune() {
   done
 
   # Walk admin entries; queue branch deletions for fully-gone groups.
+  local ws_dir; ws_dir=$(workspace_dir)
   local repo src path br gname
   local del_repo=() del_branch=() del_group=()
   for repo in "${REPOS[@]}"; do
@@ -1095,10 +1565,10 @@ cmd_prune() {
     [[ -d "$src/.git" ]] || continue
     while IFS=$'\t' read -r path br; do
       [[ -z "$path" ]] && continue
-      [[ "$path" == "$WORKTREES_DIR"/* ]] || continue
+      [[ "$path" == "$ws_dir"/* ]] || continue
       [[ -d "$path" ]] && continue                       # dir still here → not orphan
-      gname="${path#$WORKTREES_DIR/}"; gname="${gname%%/*}"
-      [[ -d "$WORKTREES_DIR/$gname" ]] && continue       # group still partly alive — leave for `rm`
+      gname="${path#"$ws_dir"/}"; gname="${gname%%/*}"
+      [[ -d "$ws_dir/$gname" ]] && continue              # group still partly alive — leave for `rm`
       [[ -z "$br" ]] && continue                         # detached — no branch to delete
       if [[ "$br" != "$gname" ]]; then
         warn "$repo: orphan worktree for group '$gname' was on branch '$br' (drift) — skipping branch deletion"
@@ -1142,19 +1612,30 @@ cmd_prune() {
 # ─── Group-level dirty / unmerged detection ─────────────────────────────────
 
 # Print the names of repos in <group> whose worktrees have uncommitted changes,
-# one per line. Empty output ⇒ everything is clean. Filters tool-created
-# `?? .claude/` noise (see setup_claude_config). Shared by `status` and `rm`.
+# one per line. Empty output ⇒ everything is clean. Shared by `status` and `rm`.
+#
+# Two things this tool creates itself are filtered out, because otherwise every
+# worktree of a repo that doesn't already carry them reads as permanently dirty
+# and `rm` would always demand --force-rm-worktree:
+#
+#   .claude/   written by setup_claude_config; can't be hidden via info/exclude,
+#              which git reads from $GIT_COMMON_DIR, shared with the source
+#   .envrc     written by ensure_source_up, but only when it is still exactly
+#              the one-line stub we wrote. Add anything to it and it counts
+#              again, because then it's your work.
 group_dirty_repos() {
   local name="$1"
   local group; group=$(group_dir "$name")
-  local repo wt porcelain
-  for repo in "${REPOS[@]}"; do
+  local repo wt porcelain filter
+  while IFS= read -r repo; do
     wt="$group/$repo"
-    [[ -d "$wt" ]] || continue
-    porcelain=$(git -C "$wt" status --porcelain 2>/dev/null \
-      | grep -vE '^\?\? \.claude/$' || true)
+    filter='^\?\? \.claude/$'
+    if [[ "$(cat "$wt/.envrc" 2>/dev/null)" == "source_up_if_exists" ]]; then
+      filter+='|^\?\? \.envrc$'
+    fi
+    porcelain=$(git -C "$wt" status --porcelain 2>/dev/null | grep -vE "$filter" || true)
     [[ -n "$porcelain" ]] && printf '%s\n' "$repo"
-  done
+  done < <(group_repos "$name")
   return 0
 }
 
@@ -1165,12 +1646,12 @@ group_dirty_repos() {
 group_unmerged_repos() {
   local name="$1"
   local repo src
-  for repo in "${REPOS[@]}"; do
+  while IFS= read -r repo; do
     src=$(source_dir "$repo")
     [[ -d "$src/.git" ]] || continue
     git -C "$src" show-ref --verify --quiet "refs/heads/$name" || continue
     branch_safe_to_delete "$src" "$name" || printf '%s\n' "$repo"
-  done
+  done < <(group_repos "$name")
   return 0
 }
 
@@ -1363,17 +1844,77 @@ cmd_rm() {
 }
 
 
+# ─── Subcommand: workspace / ws ─────────────────────────────────────────────
+#
+# Mostly a "what does the tool think I'm in?" command. The --print-* flags are
+# how the Fish wrapper asks the same question without parsing prose.
+
+cmd_workspace() {
+  local list=0 print=""
+  while (( $# > 0 )); do
+    case "$1" in
+      -l|--list)           list=1 ;;
+      --print-source-root) print=source_root ;;
+      --print-root)        print=root ;;
+      --print-name)        print=name ;;
+      -*) die "Unknown flag: $1" ;;
+      *)  die "Usage: worktrees workspace [--list]" ;;
+    esac
+    shift
+  done
+
+  if (( list == 1 )); then
+    collect_workspaces
+    local w root
+    for w in "${WT_WORKSPACES[@]}"; do
+      root=$(workspace_pointer "$w") || root="(no pointer)"
+      printf '%-24s %s\n' "$w" "$root"
+    done
+    return 0
+  fi
+
+  require_workspace
+
+  case "$print" in
+    source_root) printf '%s\n' "$SOURCE_ROOT";    return 0 ;;
+    root)        printf '%s\n' "$WORKSPACE_ROOT"; return 0 ;;
+    name)        printf '%s\n' "$WORKSPACE";      return 0 ;;
+  esac
+
+  info "workspace  $WORKSPACE"
+  info "root       $WORKSPACE_ROOT"
+  info "sources    $SOURCE_ROOT"
+  info "groups     $(workspace_dir)"
+  info "base       $(default_base)"
+  info "repos      ${REPOS[*]}"
+  if [[ -f "$WORKSPACE_ROOT/$WORKSPACE_CONF" ]]; then
+    info "config     $WORKSPACE_ROOT/$WORKSPACE_CONF"
+  else
+    info "config     (none — single-repo workspace, no config needed)"
+  fi
+}
+
+
 # ─── Entrypoint ─────────────────────────────────────────────────────────────
 
 usage() {
   cat <<EOF
 Coordinated multi-repo git worktrees
 
+Which repos a command acts on comes from the current directory:
+
+  a dir holding $WORKSPACE_CONF  ->  the workspace it declares
+  any other git repo             ->  a single-repo workspace, zero config
+
+Groups live at $WORKTREES_DIR/<workspace>/<group>/<repo>
+
 Usage:
-  worktrees init <name> [<base>] [--fetch]                     Create a worktree group (alias: create)
+  worktrees init <name> [<base>] [--repos a,b] [--fetch]       Create a worktree group (alias: create)
+  worktrees add <repo>... [--group <name>] [--base <branch>]   Widen an existing group by more repos
   worktrees switch [<name>]                                    Switch to a group; no <name> → latest (alias: go)
   worktrees ls                                                 List groups (interactive picker on a TTY via the Fish wrapper)
   worktrees status [<name>]                                    List repos with local changes (alias: st)
+  worktrees workspace [--list]                                 Show the resolved workspace, or list all (alias: ws)
   worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]
                                                                Remove a group: worktree dirs + branches
   worktrees prune [--force-rm-branch]                          Finish removal of groups whose dirs are gone
@@ -1382,13 +1923,23 @@ EOF
 
 main() {
   case "${1:-}" in
-    ""|-h|--help)        usage ;;
-    ls|list)             shift; cmd_ls     "$@" ;;
-    status|st)           shift; cmd_status "$@" ;;
-    rm|remove|delete)    shift; cmd_rm     "$@" ;;
-    prune)               shift; cmd_prune  "$@" ;;
-    init|create)         shift; cmd_init   "$@" ;;
-    switch|go)           shift; cmd_switch "$@" ;;
+    ""|-h|--help) usage; return 0 ;;
+  esac
+
+  # Resolve up front so every subcommand sees the same workspace. Failure is
+  # not fatal here: `ls` offers a picker, `workspace --list` needs no
+  # workspace at all, and everything else calls require_workspace.
+  resolve_workspace || true
+
+  case "$1" in
+    ls|list)             shift; cmd_ls        "$@" ;;
+    workspace|ws)        shift; cmd_workspace "$@" ;;
+    status|st)           shift; require_workspace; cmd_status "$@" ;;
+    rm|remove|delete)    shift; require_workspace; cmd_rm     "$@" ;;
+    prune)               shift; require_workspace; cmd_prune  "$@" ;;
+    init|create)         shift; require_workspace; cmd_init   "$@" ;;
+    add)                 shift; require_workspace; cmd_add    "$@" ;;
+    switch|go)           shift; require_workspace; cmd_switch "$@" ;;
     *)                   usage >&2; exit 2 ;;
   esac
 }
