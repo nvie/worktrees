@@ -649,7 +649,12 @@ setup_one_repo() {
   if [[ -z "$create_from" ]]; then
     git -C "$src" worktree add --no-checkout "$wt" "$name" >/dev/null
   else
-    git -C "$src" worktree add --no-checkout -b "$name" "$wt" "$create_from" >/dev/null
+    # Only origin/<name> is a legitimate upstream for <name>. Branching off the
+    # default base would otherwise leave <name> tracking origin/main, which
+    # breaks `git push-current` and misreports ahead/behind.
+    local track=--no-track
+    [[ "$create_from" == "origin/$name" ]] && track=--track
+    git -C "$src" worktree add --no-checkout "$track" -b "$name" "$wt" "$create_from" >/dev/null
   fi
 
   # Symlink git-crypt key dir from source so smudge filters work on checkout.
