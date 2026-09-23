@@ -361,6 +361,12 @@ group_landing_dir() {
   fi
 }
 
+# The source checkout counterpart of group_landing_dir: the workspace's first
+# repo, so hopping between a group and its source lands in the same spot.
+source_landing_dir() {
+  printf '%s/%s' "$SOURCE_ROOT" "${REPOS[0]}"
+}
+
 repo_in_workspace() {
   local want="$1" r
   for r in "${REPOS[@]}"; do
@@ -1351,15 +1357,17 @@ create_flow() {
   return 1
 }
 
-# Main picker loop. Lists existing groups plus a trailing "create" row. On
-# selecting a group it prints that group's path to stdout (for the Fish wrapper
-# to cd into) and returns; the create row runs create_flow and prints the new
-# path; `d` removes the highlighted group in place.
+# Main picker loop. Lists a leading row for the source checkout (named after
+# its branch), existing groups, and a trailing "create" row. On selecting the
+# source or a group it prints that path to stdout (for the Fish wrapper to cd
+# into) and returns; the create row runs create_flow and prints the new path;
+# `d` removes the highlighted group in place.
 # Refresh WT_GROUPS and the parallel WT_SUMMARIES (off-branch summary per group).
 # Summaries are computed here — once per list change — rather than in the render
 # path, so navigation keystrokes don't spawn git per group on every repaint.
 _picker_refresh() {
   collect_groups
+  SOURCE_BRANCH=$(git -C "$(source_landing_dir)" branch --show-current 2>/dev/null || true)
   WT_SUMMARIES=()
   local g
   for g in "${WT_GROUPS[@]}"; do
@@ -1379,27 +1387,31 @@ picker_loop() {
   fi
 
   _picker_refresh
-  local sel=0 total i pre
+  local sel=0 total i pre create_row
 
+  # Rows: 0 = source checkout, 1..N = groups (WT_GROUPS[row-1]), N+1 = create.
   while :; do
-    total=$(( ${#WT_GROUPS[@]} + 1 ))         # +1 for the trailing create row
+    create_row=$(( ${#WT_GROUPS[@]} + 1 ))
+    total=$(( create_row + 1 ))
     if (( sel < 0 )); then sel=0; fi
     if (( sel >= total )); then sel=$(( total - 1 )); fi
 
     paint "$(
       printf '%s  Worktrees%s  %s%s%s\n\n' "$P_BOLD" "$P_RESET" "$P_DIM" "$WORKSPACE" "$P_RESET"
+      if (( sel == 0 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s\n' "$pre" "${SOURCE_BRANCH:-(detached)}"
       if (( ${#WT_GROUPS[@]} == 0 )); then
-        printf '%s  No worktree groups yet.%s\n\n' "$P_DIM" "$P_RESET"
+        printf '%s  No worktree groups yet.%s\n' "$P_DIM" "$P_RESET"
       fi
       for i in "${!WT_GROUPS[@]}"; do
-        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+        if (( i + 1 == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
         if [[ -n "${WT_SUMMARIES[$i]}" ]]; then
           printf '%s%s   %s⚠ %s%s\n' "$pre" "${WT_GROUPS[$i]}" "$P_YELLOW" "${WT_SUMMARIES[$i]}" "$P_RESET"
         else
           printf '%s%s\n' "$pre" "${WT_GROUPS[$i]}"
         fi
       done
-      if (( sel == ${#WT_GROUPS[@]} )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      if (( sel == create_row )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
       printf '%s%s＋ Create new worktree…%s\n' "$pre" "$P_GREEN" "$P_RESET"
       printf '\n  %s↑/↓%s move  %s⏎%s open  %s d %s remove  %s w %s workspace  %s q %s quit\n' \
         "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" \
@@ -1411,7 +1423,11 @@ picker_loop() {
       up|k)   sel=$(( sel - 1 )) ;;
       down|j) sel=$(( sel + 1 )) ;;
       enter)
-        if (( sel == ${#WT_GROUPS[@]} )); then
+        if (( sel == 0 )); then
+          _tty_restore; trap - EXIT INT TERM
+          printf '%s\n' "$(source_landing_dir)"
+          return 0
+        elif (( sel == create_row )); then
           if create_flow; then
             _tty_restore; trap - EXIT INT TERM
             printf '%s\n' "$NEW_PATH"
@@ -1421,16 +1437,15 @@ picker_loop() {
           _picker_refresh
         else
           _tty_restore; trap - EXIT INT TERM
-          printf '%s\n' "$(group_landing_dir "${WT_GROUPS[$sel]}")"
+          printf '%s\n' "$(group_landing_dir "${WT_GROUPS[$(( sel - 1 ))]}")"
           return 0
         fi
         ;;
       d)
-        if (( sel < ${#WT_GROUPS[@]} )); then
-          confirm_remove "${WT_GROUPS[$sel]}" || true
+        if (( sel >= 1 && sel < create_row )); then
+          confirm_remove "${WT_GROUPS[$(( sel - 1 ))]}" || true
           _tty_clear
           _picker_refresh
-          if (( sel > ${#WT_GROUPS[@]} )); then sel=${#WT_GROUPS[@]}; fi
         fi
         ;;
       w)
