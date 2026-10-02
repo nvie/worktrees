@@ -1217,71 +1217,91 @@ workspace_picker() {
   load_workspace "$(workspace_pointer "${WT_WORKSPACES[$REPLY]}")"
 }
 
-# Confirmation dialog for removing <group>. Two toggleable rows map to rm's
-# --force flags (both off by default), plus Remove / Cancel actions. On confirm,
-# runs `cmd_rm` (output routed to the tty) and returns 0; returns 1 on cancel.
+# Confirmation dialog for removing <group>: just Remove / Cancel. On Remove,
+# checks what would actually be lost and asks a y/N question (default N) for
+# each kind that applies: uncommitted changes (→ --force-rm-worktree) and
+# unmerged branches (→ --force-rm-branch). Then runs `cmd_rm` (output routed
+# to the tty) and returns 0; returns 1 on cancel or any N.
 confirm_remove() {
   local name="$1"
-  local fwt=0 fbr=0 sel=2 i pre box
-  # Rows: 0,1 = the two toggles; 2 = Remove; 3 = Cancel.
-  # Open focused on Remove so a plain d→⏎ is the fast path.
+  local sel=0 pre header
+  # Rows: 0 = Remove, 1 = Cancel. Open focused on Remove so a plain d→⏎ is the
+  # fast path.
+  header=$(
+    printf '%s⚠  Remove worktree group %s%s%s%s\n\n' \
+      "$P_RED$P_BOLD" "$P_YELLOW$name" "$P_RESET" "$P_RED$P_BOLD" "$P_RESET"
+    printf '%s   Moves the group dir to the Trash and deletes its branches.%s\n' \
+      "$P_DIM" "$P_RESET"
+  )
   _tty_clear
   while :; do
     paint "$(
-      printf '%s⚠  Remove worktree group %s%s%s%s\n\n' \
-        "$P_RED$P_BOLD" "$P_YELLOW$name" "$P_RESET" "$P_RED$P_BOLD" "$P_RESET"
-      printf '%s   Deletes the worktree dirs in every repo AND their branches.%s\n\n' \
-        "$P_DIM" "$P_RESET"
-
-      for i in 0 1; do
-        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
-        if (( i == 0 )); then
-          if (( fwt == 1 )); then box="${P_GREEN}[x]${P_RESET}"; else box='[ ]'; fi
-          printf '%s%s %s--force-rm-worktree%s   %sremove even with uncommitted changes%s\n' \
-            "$pre" "$box" "$P_BOLD" "$P_RESET" "$P_DIM" "$P_RESET"
-        else
-          if (( fbr == 1 )); then box="${P_GREEN}[x]${P_RESET}"; else box='[ ]'; fi
-          printf '%s%s %s--force-rm-branch%s     %sdelete even with unmerged commits%s\n' \
-            "$pre" "$box" "$P_BOLD" "$P_RESET" "$P_DIM" "$P_RESET"
-        fi
-      done
-      printf '\n'
-      if (( sel == 2 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s\n\n' "$header"
+      if (( sel == 0 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
       printf '%s%s  Remove  %s\n' "$pre" "$P_RED$P_BOLD" "$P_RESET"
-      if (( sel == 3 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      if (( sel == 1 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
       printf '%s%s  Cancel  %s\n' "$pre" "$P_BOLD" "$P_RESET"
-      printf '\n  %s↑/↓%s move  %sspace%s toggle  %s⏎%s confirm  %sq%s cancel\n' \
-        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+      printf '\n  %s↑/↓%s move  %s⏎%s confirm  %sq%s cancel\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
     )"
-
     _read_key
     case "$REPLY" in
-      up|k)   sel=$(( (sel - 1 + 4) % 4 )) ;;
-      down|j) sel=$(( (sel + 1) % 4 )) ;;
-      space)
-        if (( sel == 0 )); then fwt=$(( 1 - fwt )); fi
-        if (( sel == 1 )); then fbr=$(( 1 - fbr )); fi
-        ;;
-      enter)
-        case "$sel" in
-          0) fwt=$(( 1 - fwt )) ;;
-          1) fbr=$(( 1 - fbr )) ;;
-          2)
-            local flags=()
-            if (( fwt == 1 )); then flags+=(--force-rm-worktree); fi
-            if (( fbr == 1 )); then flags+=(--force-rm-branch); fi
-            printf '\e[2J\e[H' > "$TTY"
-            ( cmd_rm "$name" "${flags[@]}" ) > "$TTY" 2>&1 || true
-            printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
-            _read_key
-            return 0
-            ;;
-          3) return 1 ;;
-        esac
-        ;;
-      q|esc) return 1 ;;
+      up|k|down|j) sel=$(( 1 - sel )) ;;
+      enter)       if (( sel == 0 )); then break; else return 1; fi ;;
+      q|esc)       return 1 ;;
     esac
   done
+
+  local dirty unmerged flags=() body
+  dirty=$(group_dirty_repos "$name")
+  unmerged=$(group_unmerged_repos "$name")
+  body="$header"$'\n'
+  if [[ -n "$dirty" ]]; then
+    body+=$(
+      printf '\n  %sUncommitted changes%s in: %s\n' "$P_YELLOW$P_BOLD" "$P_RESET" "$(echo $dirty)"
+      printf '  Remove anyway? They stay recoverable from the Trash. %s[y/N]%s ' "$P_BOLD" "$P_RESET"
+    )
+    paint "$body"
+    _read_key
+    [[ "$REPLY" == y || "$REPLY" == Y ]] || return 1
+    body+=$'yes\n'
+    flags+=(--force-rm-worktree)
+  fi
+  if [[ -n "$unmerged" ]]; then
+    body+=$(
+      printf '\n  %sUnmerged commits%s on %s in: %s\n' "$P_YELLOW$P_BOLD" "$P_RESET" "$name" "$(echo $unmerged)"
+      printf '  Delete anyway? Their SHAs will be shown so you can restore them. %s[y/N]%s ' "$P_BOLD" "$P_RESET"
+    )
+    paint "$body"
+    _read_key
+    [[ "$REPLY" == y || "$REPLY" == Y ]] || return 1
+    flags+=(--force-rm-branch)
+  fi
+
+  _tty_clear
+  ( cmd_rm "$name" "${flags[@]}" ) > "$TTY" 2>&1 || true
+  printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
+  _read_key
+  return 0
+}
+
+# Print a recap of everything removed this session (from RM_JOURNAL) to
+# stderr, once the alt screen is gone — so a stray `q` never hides the SHAs
+# needed to bring a branch back. stdout is reserved for the path to cd into.
+print_rm_journal() {
+  [[ -s "$RM_JOURNAL" ]] || return 0
+  local kind a b c d bold="" dim="" reset=""
+  if [[ -t 2 ]]; then bold=$P_BOLD; dim=$P_DIM; reset=$P_RESET; fi
+  {
+    printf '%sRemoved this session:%s\n' "$bold" "$reset"
+    while IFS=$'\t' read -r kind a b c d; do
+      case "$kind" in
+        trash)  printf '  %s → Trash\n' "${a/#$HOME/\~}" ;;
+        branch) printf '  %s: deleted branch %s (was %s)   %sgit -C %s branch %s %s%s\n' \
+                  "$a" "$b" "${c:0:12}" "$dim" "${d/#$HOME/\~}" "$b" "$c" "$reset" ;;
+      esac
+    done < "$RM_JOURNAL"
+  } >&2
 }
 
 # Show a one-line abort message in the create flow, then wait for a keypress.
@@ -1376,14 +1396,25 @@ _picker_refresh() {
   done
 }
 
+# Leave the picker: restore the terminal, then recap this session's removals.
+# Idempotent, so it's safe as both the trap and the explicit exit path.
+_picker_done() {
+  trap - EXIT INT TERM
+  _tty_restore
+  print_rm_journal
+  rm -f "$RM_JOURNAL"
+}
+
 picker_loop() {
-  trap '_tty_restore' EXIT INT TERM
+  RM_JOURNAL=$(mktemp)
+  trap '_picker_done' EXIT
+  trap '_picker_done; exit 130' INT TERM
   _tty_setup
   _tty_clear
 
   # Started from somewhere that implies no workspace: ask instead of erroring.
   if (( WORKSPACE_OK == 0 )) && ! workspace_picker; then
-    _tty_restore; trap - EXIT INT TERM
+    _picker_done
     return 0
   fi
 
@@ -1425,19 +1456,19 @@ picker_loop() {
       down|j) sel=$(( sel + 1 )) ;;
       enter)
         if (( sel == 0 )); then
-          _tty_restore; trap - EXIT INT TERM
+          _picker_done
           printf '%s\n' "$(source_landing_dir)"
           return 0
         elif (( sel == create_row )); then
           if create_flow; then
-            _tty_restore; trap - EXIT INT TERM
+            _picker_done
             printf '%s\n' "$NEW_PATH"
             return 0
           fi
           _tty_clear
           _picker_refresh
         else
-          _tty_restore; trap - EXIT INT TERM
+          _picker_done
           printf '%s\n' "$(group_landing_dir "${WT_GROUPS[$(( sel - 1 ))]}")"
           return 0
         fi
@@ -1456,7 +1487,7 @@ picker_loop() {
         sel=0
         ;;
       q|esc)
-        _tty_restore; trap - EXIT INT TERM
+        _picker_done
         return 0
         ;;
     esac
@@ -1728,11 +1759,25 @@ worktree_admin_dir() {
   return 0
 }
 
+# When set (by the picker), every removal appends a line to this file so the
+# session can recap them on exit: "branch\t<repo>\t<branch>\t<sha>\t<src>" or
+# "trash\t<path>".
+RM_JOURNAL="${RM_JOURNAL:-}"
+
+journal() {
+  if [[ -n "$RM_JOURNAL" ]]; then
+    local IFS=$'\t'
+    printf '%s\n' "$*" >> "$RM_JOURNAL"
+  fi
+  return 0
+}
+
 # Move <path> to the macOS Trash instead of deleting it, so a removed
 # worktree, uncommitted changes included, can still be put back.
 trash_path() {
   local path="$1"
-  trash "$path" >/dev/null
+  trash "$path" >/dev/null || return 1
+  journal trash "$path"
 }
 
 # Delete branch <b> in <repo>'s source, reporting its tip SHA so it can be
@@ -1747,6 +1792,7 @@ delete_branch() {
   }
   if git -C "$src" branch -D "$b" >/dev/null 2>&1; then
     ok "$repo: deleted branch $b (was ${sha:0:12})"
+    journal branch "$repo" "$b" "$sha" "$src"
   else
     warn "$repo: failed to delete branch $b"
   fi

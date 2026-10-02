@@ -540,6 +540,11 @@ change isn't squash-merged into the default base either (the same
 `commit-tree` + `git cherry` check as git-toolbelt's `git cleanup -s`). So a
 squash-merged PR branch removes without forcing.
 
+In the picker, `d` asks only Remove / Cancel. The gates are then checked, and
+for each one that would actually lose data you get a y/N question (default N).
+On exit, the picker recaps every removal of the session on stderr, restore
+commands included, so a stray `q` never loses the SHAs.
+
 **`rm` is idempotent.** If some repos are healthy and others are half-removed,
 re-running picks up where the last run left off:
 
