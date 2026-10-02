@@ -1580,7 +1580,7 @@ cmd_prune() {
   # Walk admin entries; queue branch deletions for fully-gone groups.
   local ws_dir; ws_dir=$(workspace_dir)
   local repo src path br gname
-  local del_repo=() del_branch=() del_group=()
+  local del_repo=() del_branch=() del_group=() del_path=()
   for repo in "${REPOS[@]}"; do
     src=$(source_dir "$repo")
     [[ -d "$src/.git" ]] || continue
@@ -1598,16 +1598,21 @@ cmd_prune() {
       del_repo+=("$repo")
       del_branch+=("$br")
       del_group+=("$gname")
+      del_path+=("$path")
     done < <(worktree_list_admin "$repo")
   done
 
   # Delete branches.
-  local i b
+  # The orphan admin entry still claims the branch, so git won't delete it
+  # until that entry is dropped.
+  local i b admin
   for i in "${!del_repo[@]}"; do
     repo="${del_repo[$i]}"
     src=$(source_dir "$repo")
     b="${del_branch[$i]}"
     if (( force_br == 1 )) || branch_safe_to_delete "$src" "$b"; then
+      admin=$(worktree_admin_dir "$src" "${del_path[$i]}")
+      if [[ -n "$admin" ]]; then rm -rf "$admin"; fi
       delete_branch "$repo" "$b"
     else
       warn "$repo: branch '$b' (group '${del_group[$i]}') has unmerged commits — kept. (rerun with --force-rm-branch to force)"
