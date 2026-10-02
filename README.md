@@ -505,9 +505,12 @@ Defaults to the group you're standing in.
 
 `rm` is a two-step cleanup:
 
-1. Remove the worktree dirs under the group and the corresponding
-   `git worktree` admin entries in every source repo.
-2. Delete the branches those worktrees were on.
+1. Move the group dir to the macOS Trash (one item, uncommitted changes
+   included) and unregister its `git worktree` admin entries in every source
+   repo.
+2. Delete the branches those worktrees were on, printing each tip SHA
+   (`deleted branch foo (was 1a2b3c4d5e6f)`) so `git branch foo <sha>` brings
+   it back.
 
 Step 2 is **evidence-based**: a branch is only deleted if there's an admin
 entry under this group pointing at it. `rm` never matches branches by name
@@ -540,12 +543,12 @@ squash-merged PR branch removes without forcing.
 **`rm` is idempotent.** If some repos are healthy and others are half-removed,
 re-running picks up where the last run left off:
 
-| State          | Dir | Admin | Action                                  |
-| -------------- | --- | ----- | --------------------------------------- |
-| `HEALTHY`      | ✓   | ✓     | `git worktree remove` + `git branch -d` |
-| `DIR_ONLY`     | ✓   | ✗     | `rm -rf` + skip branch (no evidence)    |
-| `ORPHAN_ADMIN` | ✗   | ✓     | `git worktree prune` + `git branch -d`  |
-| `GONE`         | ✗   | ✗     | nothing                                 |
+| State          | Dir | Admin | Action                                       |
+| -------------- | --- | ----- | -------------------------------------------- |
+| `HEALTHY`      | ✓   | ✓     | Trash + drop admin entry + delete branch     |
+| `DIR_ONLY`     | ✓   | ✗     | Trash + skip branch (no evidence)            |
+| `ORPHAN_ADMIN` | ✗   | ✓     | drop admin entry + delete branch             |
+| `GONE`         | ✗   | ✗     | nothing                                      |
 
 `prune` is the deferred step 2: "I deleted a group's directory by hand, now
 finish the cleanup". Before delegating to `git worktree prune` (which _destroys_

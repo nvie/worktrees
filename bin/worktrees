@@ -1608,9 +1608,7 @@ cmd_prune() {
     src=$(source_dir "$repo")
     b="${del_branch[$i]}"
     if (( force_br == 1 )) || branch_safe_to_delete "$src" "$b"; then
-      git -C "$src" branch -D "$b" >/dev/null 2>&1 \
-        && ok "$repo: deleted branch $b (group ${del_group[$i]})" \
-        || warn "$repo: failed to delete branch $b"
+      delete_branch "$repo" "$b"
     else
       warn "$repo: branch '$b' (group '${del_group[$i]}') has unmerged commits — kept. (rerun with --force-rm-branch to force)"
     fi
@@ -1707,6 +1705,48 @@ rm_worktree_info() {
   printf '%s\t%s\n' "$state" "$branch"
 }
 
+# Print the admin dir ($GIT_COMMON_DIR/worktrees/<id>) through which <src>
+# tracks the worktree at <wt>, or nothing. Removing that dir is exactly how
+# `git worktree remove` unregisters a worktree, minus deleting its files —
+# and unlike `git worktree prune` it touches no other (orphaned) entries,
+# which `prune` relies on as evidence.
+worktree_admin_dir() {
+  local src="$1" wt="$2" common d
+  common=$(git -C "$src" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  for d in "$common"/worktrees/*/; do
+    [[ -f "$d/gitdir" ]] || continue
+    if [[ "$(cat "$d/gitdir")" == "$wt/.git" ]]; then
+      printf '%s' "${d%/}"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# Move <path> to the macOS Trash instead of deleting it, so a removed
+# worktree, uncommitted changes included, can still be put back.
+trash_path() {
+  local path="$1"
+  trash "$path" >/dev/null
+}
+
+# Delete branch <b> in <repo>'s source, reporting its tip SHA so it can be
+# restored with `git branch <b> <sha>`. Callers have already decided that the
+# deletion is safe (or forced), so this always uses -D: `git branch -d` only
+# knows about upstream/HEAD and would refuse squash-merged branches.
+delete_branch() {
+  local repo="$1" b="$2"
+  local src; src=$(source_dir "$repo")
+  local sha; sha=$(git -C "$src" rev-parse --verify --quiet "refs/heads/$b") || {
+    warn "$repo: branch $b not found"; return 0
+  }
+  if git -C "$src" branch -D "$b" >/dev/null 2>&1; then
+    ok "$repo: deleted branch $b (was ${sha:0:12})"
+  else
+    warn "$repo: failed to delete branch $b"
+  fi
+}
+
 # Returns 0 if deleting branch <b> in <src> loses no commits, i.e. it has
 # landed in one of its trunks: its upstream, origin/<b>, the source's HEAD, or
 # the default base (remote and local flavor). "Landed" means the tip is
@@ -1751,8 +1791,10 @@ branch_squash_merged() {
 # ─── Subcommand: rm ─────────────────────────────────────────────────────────
 #
 # Two-step cleanup with idempotent recovery:
-#   1. Remove worktree dirs under ~/Desktop/worktrees/<name>/
-#   2. Delete the corresponding branches in each source repo
+#   1. Move the group dir ~/Desktop/worktrees/<name>/ to the Trash and
+#      unregister its worktrees
+#   2. Delete the corresponding branches in each source repo, reporting each
+#      tip SHA so it can be restored
 #
 # Step 2 only runs for branches with *evidence*: a worktree-admin entry whose
 # path is under <group>/. So re-running after a manual `rm -rf` of the group
@@ -1781,6 +1823,8 @@ cmd_rm() {
   [[ -n "$name" ]] || die "Usage: worktrees rm <name> [--force-rm-worktree] [--force-rm-branch]"
 
   local group; group=$(group_dir "$name")
+  command -v trash >/dev/null \
+    || die "\`trash\` not found (ships with macOS 15+); refusing to delete worktrees permanently."
 
   # Per-repo state + admin-branch.
   local repo i state branch
@@ -1843,41 +1887,29 @@ cmd_rm() {
     fi
   fi
 
-  # Execute.
-  local src
+  # Execute. The whole group dir goes to the Trash as one item first, so a
+  # failure there aborts before any branch is touched.
+  if [[ -d "$group" ]]; then
+    step "moving ${group/#$HOME/\~} to Trash"
+    trash_path "$group" || die "Failed to move $group to Trash — nothing removed."
+  fi
+
+  local src admin
   for i in "${!REPOS[@]}"; do
     repo="${REPOS[$i]}"
-    wt="$group/$repo"
     src=$(source_dir "$repo")
     b="${branches[$i]}"
     case "${states[$i]}" in
-      HEALTHY)
-        step "$repo: removing worktree"
-        git -C "$src" worktree remove --force "$wt" 2>/dev/null \
-          || { rm -rf "$wt"; git -C "$src" worktree prune >/dev/null 2>&1 || true; }
+      HEALTHY|ORPHAN_ADMIN)
+        admin=$(worktree_admin_dir "$src" "$group/$repo")
+        if [[ -n "$admin" ]]; then rm -rf "$admin"; fi
+        [[ -n "$b" ]] && delete_branch "$repo" "$b"
         ;;
       DIR_ONLY)
-        step "$repo: removing dir (no admin entry — branch can't be inferred)"
-        rm -rf "$wt"
         warn "$repo: no admin evidence — skipped branch deletion (manually: \`git -C $src branch -d $name\`)"
         ;;
-      ORPHAN_ADMIN)
-        step "$repo: pruning orphaned admin entry"
-        git -C "$src" worktree prune >/dev/null 2>&1 || true
-        ;;
-      GONE) continue ;;
     esac
-    # Branch delete (skip DIR_ONLY: no evidence; skip GONE: handled above).
-    case "${states[$i]}" in HEALTHY|ORPHAN_ADMIN) ;; *) continue ;; esac
-    [[ -n "$b" ]] || continue
-    # -D: preflight already decided this is safe (or forced), and `branch -d`
-    # only knows upstream/HEAD, so it would refuse squash-merged branches.
-    git -C "$src" branch -D "$b" >/dev/null 2>&1 \
-      && ok "$repo: deleted branch $b" \
-      || warn "$repo: failed to delete branch $b"
   done
-
-  [[ -d "$group" ]] && rm -rf "$group"
 
   ok "Removed: $name"
 }
