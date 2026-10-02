@@ -1607,18 +1607,12 @@ cmd_prune() {
     repo="${del_repo[$i]}"
     src=$(source_dir "$repo")
     b="${del_branch[$i]}"
-    if (( force_br == 1 )); then
+    if (( force_br == 1 )) || branch_safe_to_delete "$src" "$b"; then
       git -C "$src" branch -D "$b" >/dev/null 2>&1 \
         && ok "$repo: deleted branch $b (group ${del_group[$i]})" \
         || warn "$repo: failed to delete branch $b"
     else
-      if branch_safe_to_delete "$src" "$b"; then
-        git -C "$src" branch -d "$b" >/dev/null 2>&1 \
-          && ok "$repo: deleted branch $b (group ${del_group[$i]})" \
-          || warn "$repo: failed to delete branch $b"
-      else
-        warn "$repo: branch '$b' (group '${del_group[$i]}') has unmerged commits — kept. (rerun with --force-rm-branch to force)"
-      fi
+      warn "$repo: branch '$b' (group '${del_group[$i]}') has unmerged commits — kept. (rerun with --force-rm-branch to force)"
     fi
   done
 
@@ -1660,10 +1654,9 @@ group_dirty_repos() {
   return 0
 }
 
-# Print the names of repos in <group> whose branch <name> has commits not
-# reachable from its upstream (or HEAD-of-source if no upstream is set) —
-# i.e. there's local commit work that hasn't landed yet. Same predicate
-# `git branch -d` uses, via branch_safe_to_delete (defined below).
+# Print the names of repos in <group> whose branch <name> has commits that
+# haven't landed anywhere, i.e. deleting it would lose work. Same predicate
+# `rm` gates on, via branch_safe_to_delete (defined below).
 group_unmerged_repos() {
   local name="$1"
   local repo src
@@ -1714,16 +1707,44 @@ rm_worktree_info() {
   printf '%s\t%s\n' "$state" "$branch"
 }
 
-# Returns 0 if `git branch -d <b>` would succeed in <src>. Reproduces git's
-# fully-merged check: branch tip is reachable from its upstream (or HEAD).
-# Treats a non-existent branch ref as "safe" (nothing to delete).
+# Returns 0 if deleting branch <b> in <src> loses no commits, i.e. it has
+# landed in one of its trunks: its upstream, origin/<b>, the source's HEAD, or
+# the default base (remote and local flavor). "Landed" means the tip is
+# reachable from the trunk, or — for the default base — that the branch's net
+# change was squash-merged into it (same check as git-toolbelt's
+# `git cleanup -s`). Treats a non-existent branch ref as "safe".
 branch_safe_to_delete() {
   local src="$1" b="$2"
   git -C "$src" show-ref --verify --quiet "refs/heads/$b" || return 0
-  local cmp
-  cmp=$(git -C "$src" rev-parse --abbrev-ref --symbolic-full-name "$b@{upstream}" 2>/dev/null) || cmp=""
-  [[ -n "$cmp" ]] || cmp="HEAD"
-  git -C "$src" merge-base --is-ancestor "refs/heads/$b" "$cmp" 2>/dev/null
+
+  local base; base=$(default_base)
+  local trunks=() squash_trunks=("$base") t up
+  if [[ "$base" == origin/* ]]; then squash_trunks+=("${base#origin/}"); fi
+  up=$(git -C "$src" rev-parse --abbrev-ref --symbolic-full-name "$b@{upstream}" 2>/dev/null) || up=""
+  if [[ -n "$up" ]]; then trunks+=("$up"); fi
+  trunks+=("origin/$b" HEAD "${squash_trunks[@]}")
+
+  for t in "${trunks[@]}"; do
+    git -C "$src" rev-parse --verify --quiet "$t^{commit}" >/dev/null || continue
+    git -C "$src" merge-base --is-ancestor "refs/heads/$b" "$t" 2>/dev/null && return 0
+  done
+  for t in "${squash_trunks[@]}"; do
+    git -C "$src" rev-parse --verify --quiet "$t^{commit}" >/dev/null || continue
+    branch_squash_merged "$src" "$b" "$t" && return 0
+  done
+  return 1
+}
+
+# Returns 0 if <b>'s net change since its fork point is already in <trunk> as
+# an equivalent patch: squash the branch into one dangling commit on top of
+# the merge base, then ask `git cherry` whether trunk has a patch-identical
+# commit.
+branch_squash_merged() {
+  local src="$1" b="$2" trunk="$3" mb tree squashed
+  mb=$(git -C "$src" merge-base "$trunk" "refs/heads/$b" 2>/dev/null) || return 1
+  tree=$(git -C "$src" rev-parse "refs/heads/$b^{tree}") || return 1
+  squashed=$(git -C "$src" commit-tree "$tree" -p "$mb" -m _) || return 1
+  [[ "$(git -C "$src" cherry "$trunk" "$squashed" 2>/dev/null)" == "- $squashed" ]]
 }
 
 
@@ -1742,7 +1763,8 @@ branch_safe_to_delete() {
 # Safety gates (all abort upfront — never partial state):
 #   - drift:    any worktree off-branch → abort, no override
 #   - dirty:    any worktree with uncommitted changes → --force-rm-worktree
-#   - unmerged: any branch with commits not in upstream/HEAD → --force-rm-branch
+#   - unmerged: any branch whose commits haven't landed (merged, squash-merged,
+#               or pushed; see branch_safe_to_delete) → --force-rm-branch
 
 cmd_rm() {
   local name="" force_wt=0 force_br=0
@@ -1848,15 +1870,11 @@ cmd_rm() {
     # Branch delete (skip DIR_ONLY: no evidence; skip GONE: handled above).
     case "${states[$i]}" in HEALTHY|ORPHAN_ADMIN) ;; *) continue ;; esac
     [[ -n "$b" ]] || continue
-    if (( force_br == 1 )); then
-      git -C "$src" branch -D "$b" >/dev/null 2>&1 \
-        && ok "$repo: deleted branch $b" \
-        || warn "$repo: failed to delete branch $b"
-    else
-      git -C "$src" branch -d "$b" >/dev/null 2>&1 \
-        && ok "$repo: deleted branch $b" \
-        || warn "$repo: failed to delete branch $b (preflight passed — investigate)"
-    fi
+    # -D: preflight already decided this is safe (or forced), and `branch -d`
+    # only knows upstream/HEAD, so it would refuse squash-merged branches.
+    git -C "$src" branch -D "$b" >/dev/null 2>&1 \
+      && ok "$repo: deleted branch $b" \
+      || warn "$repo: failed to delete branch $b"
   done
 
   [[ -d "$group" ]] && rm -rf "$group"

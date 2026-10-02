@@ -523,13 +523,19 @@ flowchart LR
   D1 -- yes --> A1["abort<br/>no override"]
   D1 -- no --> D2{"dirty<br/>uncommitted changes<br/>in a worktree?"}
   D2 -- yes --> A2["abort unless<br/>--force-rm-worktree<br/>working-tree data lost"]
-  D2 -- no --> D3{"unmerged<br/>branch tip not in<br/>its upstream?"}
+  D2 -- no --> D3{"unmerged<br/>branch not merged,<br/>squash-merged, or pushed?"}
   D3 -- yes --> A3["abort unless<br/>--force-rm-branch<br/>commits lost"]
   D3 -- no --> OK["remove worktrees,<br/>then delete branches"]
 ```
 
 The two `--force-*` flags are orthogonal; there is intentionally no umbrella
 `--force`.
+
+"Unmerged" means the branch tip isn't reachable from its upstream,
+`origin/<branch>`, the source's `HEAD`, or the default base — and its net
+change isn't squash-merged into the default base either (the same
+`commit-tree` + `git cherry` check as git-toolbelt's `git cleanup -s`). So a
+squash-merged PR branch removes without forcing.
 
 **`rm` is idempotent.** If some repos are healthy and others are half-removed,
 re-running picks up where the last run left off:
