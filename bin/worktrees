@@ -499,6 +499,7 @@ write_envrc_if_missing() {
     done
     echo "bg=\"$bg\"   # hashed from name"
     echo "printf '\\e]11;%s\\a' \"\$bg\" > /dev/tty"
+    echo "export WORKTREE_BG=\"\$bg\""
     echo ""
     echo "# Reset CDPATH, then rebuild: '.' first, group root, container subdirs."
     echo "# path_add prepends, so add in reverse order of desired final order."

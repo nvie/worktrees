@@ -276,6 +276,7 @@ export WORKTREE_WORKSPACE_ROOT="/Users/nvie/Projects/acme"
 …
 bg="#2e0d1a"   # hashed from name
 printf '\e]11;%s\a' "$bg" > /dev/tty
+export WORKTREE_BG="$bg"
 
 # Reset CDPATH, then rebuild: '.' first, group root, container subdirs.
 # path_add prepends, so add in reverse order of desired final order.
