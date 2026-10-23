@@ -1090,9 +1090,9 @@ paint() {
   printf '\e[H%s\e[K\e[J' "${frame//$'\n'/$'\e[K'$'\n'}" > "$TTY"
 }
 
-# Read one logical keypress from the tty into REPLY: up down enter space q esc,
-# or the literal character otherwise. Decodes the common arrow-key escape
-# sequences (ESC [ A/B/C/D).
+# Read one logical keypress from the tty into REPLY: up down left right enter
+# space esc backspace ctrl-{d,n,p,u,w}, or the literal character otherwise.
+# Decodes the common arrow-key escape sequences (ESC [ A/B/C/D).
 _read_key() {
   local c rest
   IFS= read -rsn1 c < "$TTY" || { REPLY=q; return 0; }
@@ -1110,9 +1110,28 @@ _read_key() {
       ;;
     ''|$'\r'|$'\n') REPLY=enter ;;
     ' ')            REPLY=space ;;
+    $'\x7f'|$'\b')  REPLY=backspace ;;
+    $'\x04')        REPLY=ctrl-d ;;
+    $'\x0e')        REPLY=ctrl-n ;;
+    $'\x10')        REPLY=ctrl-p ;;
+    $'\x15')        REPLY=ctrl-u ;;
+    $'\x17')        REPLY=ctrl-w ;;
     *)              REPLY="$c" ;;
   esac
   return 0
+}
+
+# fzf-style fuzzy match: succeed if <query>'s characters all appear in <text>,
+# in order, case-insensitively. An empty query matches everything.
+_fuzzy_match() {
+  local text="$1" query="$2" pat='*' i rc=0
+  for (( i = 0; i < ${#query}; i++ )); do
+    pat+="\\${query:i:1}*"
+  done
+  shopt -s nocasematch
+  [[ "$text" == $pat ]] || rc=1
+  shopt -u nocasematch
+  return $rc
 }
 
 # Echo every local branch across all source repos, de-duplicated, sorted.
@@ -1379,10 +1398,11 @@ create_flow() {
 }
 
 # Main picker loop. Lists a leading row for the source checkout (named after
-# its branch), existing groups, and a trailing "create" row. On selecting the
-# source or a group it prints that path to stdout (for the Fish wrapper to cd
-# into) and returns; the create row runs create_flow and prints the new path;
-# `d` removes the highlighted group in place.
+# its branch), existing groups, and a trailing "create" row. Typing fuzzy-
+# filters the source and group rows, fzf-style; the create row always stays.
+# On selecting the source or a group it prints that path to stdout (for the
+# Fish wrapper to cd into) and returns; the create row runs create_flow and
+# prints the new path; ^D removes the highlighted group in place.
 # Refresh WT_GROUPS and the parallel WT_SUMMARIES (off-branch summary per group).
 # Summaries are computed here — once per list change — rather than in the render
 # path, so navigation keystrokes don't spawn git per group on every repaint.
@@ -1419,47 +1439,65 @@ picker_loop() {
   fi
 
   _picker_refresh
-  local sel=0 total i pre create_row
+  local sel=0 query='' i row pre create_row
+  local rows=()
 
   # Rows: 0 = source checkout, 1..N = groups (WT_GROUPS[row-1]), N+1 = create.
+  # `rows` holds the ones matching the query, in order; `sel` indexes into it.
   while :; do
     create_row=$(( ${#WT_GROUPS[@]} + 1 ))
-    total=$(( create_row + 1 ))
+    rows=()
+    if _fuzzy_match "${SOURCE_BRANCH:-(detached)}" "$query"; then rows+=(0); fi
+    for i in "${!WT_GROUPS[@]}"; do
+      if _fuzzy_match "${WT_GROUPS[$i]}" "$query"; then rows+=($(( i + 1 ))); fi
+    done
+    rows+=("$create_row")
     if (( sel < 0 )); then sel=0; fi
-    if (( sel >= total )); then sel=$(( total - 1 )); fi
+    if (( sel >= ${#rows[@]} )); then sel=$(( ${#rows[@]} - 1 )); fi
+    row=${rows[$sel]}
 
     paint "$(
-      printf '%s  Worktrees%s  %s%s%s\n\n' "$P_BOLD" "$P_RESET" "$P_DIM" "$WORKSPACE" "$P_RESET"
-      if (( sel == 0 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
-      printf '%s%s\n' "$pre" "${SOURCE_BRANCH:-(detached)}"
-      if (( ${#WT_GROUPS[@]} == 0 )); then
-        printf '%s  No worktree groups yet.%s\n' "$P_DIM" "$P_RESET"
+      printf '%s  Worktrees%s  %s%s%s\n' "$P_BOLD" "$P_RESET" "$P_DIM" "$WORKSPACE" "$P_RESET"
+      if [[ -n "$query" ]]; then
+        printf '  %s❯%s %s%s▏%s\n\n' "$P_CYAN" "$P_RESET" "$query" "$P_DIM" "$P_RESET"
+      else
+        printf '  %s❯ type to filter%s\n\n' "$P_DIM" "$P_RESET"
       fi
-      for i in "${!WT_GROUPS[@]}"; do
-        if (( i + 1 == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
-        if [[ -n "${WT_SUMMARIES[$i]}" ]]; then
-          printf '%s%s   %s⚠ %s%s\n' "$pre" "${WT_GROUPS[$i]}" "$P_YELLOW" "${WT_SUMMARIES[$i]}" "$P_RESET"
+      if (( ${#WT_GROUPS[@]} == 0 )) && [[ -z "$query" ]]; then
+        printf '%s  No worktree groups yet.%s\n' "$P_DIM" "$P_RESET"
+      elif (( ${#rows[@]} == 1 )); then
+        printf '%s  No matches.%s\n' "$P_DIM" "$P_RESET"
+      fi
+      for i in "${!rows[@]}"; do
+        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+        if (( rows[i] == 0 )); then
+          printf '%s%s\n' "$pre" "${SOURCE_BRANCH:-(detached)}"
+        elif (( rows[i] == create_row )); then
+          printf '%s%s＋ Create new worktree…%s\n' "$pre" "$P_GREEN" "$P_RESET"
+        elif [[ -n "${WT_SUMMARIES[$(( rows[i] - 1 ))]}" ]]; then
+          printf '%s%s   %s⚠ %s%s\n' "$pre" "${WT_GROUPS[$(( rows[i] - 1 ))]}" \
+            "$P_YELLOW" "${WT_SUMMARIES[$(( rows[i] - 1 ))]}" "$P_RESET"
         else
-          printf '%s%s\n' "$pre" "${WT_GROUPS[$i]}"
+          printf '%s%s\n' "$pre" "${WT_GROUPS[$(( rows[i] - 1 ))]}"
         fi
       done
-      if (( sel == create_row )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
-      printf '%s%s＋ Create new worktree…%s\n' "$pre" "$P_GREEN" "$P_RESET"
-      printf '\n  %s↑/↓%s move  %s⏎%s open  %s d %s remove  %s w %s workspace  %s q %s quit\n' \
+      printf '\n  %s↑/↓%s move  %s⏎%s open  %s^D%s remove  %s^W%s workspace  %sesc%s clear/quit\n' \
         "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" \
         "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
     )"
 
     _read_key
     case "$REPLY" in
-      up|k)   sel=$(( sel - 1 )) ;;
-      down|j) sel=$(( sel + 1 )) ;;
+      up|ctrl-p)   sel=$(( sel - 1 )) ;;
+      down|ctrl-n) sel=$(( sel + 1 )) ;;
+      backspace)   query=${query%?}; sel=0 ;;
+      ctrl-u)      query=''; sel=0 ;;
       enter)
-        if (( sel == 0 )); then
+        if (( row == 0 )); then
           _picker_done
           printf '%s\n' "$(source_landing_dir)"
           return 0
-        elif (( sel == create_row )); then
+        elif (( row == create_row )); then
           if create_flow; then
             _picker_done
             printf '%s\n' "$NEW_PATH"
@@ -1469,26 +1507,39 @@ picker_loop() {
           _picker_refresh
         else
           _picker_done
-          printf '%s\n' "$(group_landing_dir "${WT_GROUPS[$(( sel - 1 ))]}")"
+          printf '%s\n' "$(group_landing_dir "${WT_GROUPS[$(( row - 1 ))]}")"
           return 0
         fi
         ;;
-      d)
-        if (( sel >= 1 && sel < create_row )); then
-          confirm_remove "${WT_GROUPS[$(( sel - 1 ))]}" || true
+      ctrl-d)
+        if (( row >= 1 && row < create_row )); then
+          confirm_remove "${WT_GROUPS[$(( row - 1 ))]}" || true
           _tty_clear
           _picker_refresh
         fi
         ;;
-      w)
+      ctrl-w)
         workspace_picker || true
         _tty_clear
         _picker_refresh
+        query=''
         sel=0
         ;;
-      q|esc)
-        _picker_done
-        return 0
+      esc)
+        if [[ -n "$query" ]]; then
+          query=''
+          sel=0
+        else
+          _picker_done
+          return 0
+        fi
+        ;;
+      *)
+        # Any other single printable character extends the query.
+        if (( ${#REPLY} == 1 )) && [[ "$REPLY" == [[:print:]] ]]; then
+          query+="$REPLY"
+          sel=0
+        fi
         ;;
     esac
   done

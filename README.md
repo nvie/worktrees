@@ -477,10 +477,11 @@ different `bg=` line in the group's `.envrc` — re-runs won't touch it.
 ## Other commands
 
 `ls` has two faces. Through the Fish wrapper on a terminal it opens an
-interactive picker: `↑/↓` to move, `⏎` to `cd` into a group (landing in its
-first repo), `d` to remove one
-(a confirm dialog whose checkboxes map to the `--force-rm-*` flags), `w` to
-switch workspace, or drop onto the trailing row to create a new group — which
+interactive picker: type to fuzzy-filter (fzf-style), `↑/↓` to move, `⏎` to
+`cd` into a group (landing in its first repo), `^D` to remove one
+(a confirm dialog whose checkboxes map to the `--force-rm-*` flags), `^W` to
+switch workspace, `Esc` to clear the filter (or quit when it's empty), or drop
+onto the trailing row to create a new group — which
 prompts for a name, a repo subset, and a base branch picked from every local
 branch across the workspace's repos.
 
@@ -540,10 +541,10 @@ change isn't squash-merged into the default base either (the same
 `commit-tree` + `git cherry` check as git-toolbelt's `git cleanup -s`). So a
 squash-merged PR branch removes without forcing.
 
-In the picker, `d` asks only Remove / Cancel. The gates are then checked, and
+In the picker, `^D` asks only Remove / Cancel. The gates are then checked, and
 for each one that would actually lose data you get a y/N question (default N).
 On exit, the picker recaps every removal of the session on stderr, restore
-commands included, so a stray `q` never loses the SHAs.
+commands included, so a stray `Esc` never loses the SHAs.
 
 **`rm` is idempotent.** If some repos are healthy and others are half-removed,
 re-running picks up where the last run left off:
