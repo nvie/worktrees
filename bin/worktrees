@@ -1091,7 +1091,7 @@ paint() {
 }
 
 # Read one logical keypress from the tty into REPLY: up down left right enter
-# space esc backspace ctrl-{d,n,p,u,w}, or the literal character otherwise.
+# space esc backspace ctrl-{d,n,p,u,w,x}, or the literal character otherwise.
 # Decodes the common arrow-key escape sequences (ESC [ A/B/C/D).
 _read_key() {
   local c rest
@@ -1116,6 +1116,7 @@ _read_key() {
     $'\x10')        REPLY=ctrl-p ;;
     $'\x15')        REPLY=ctrl-u ;;
     $'\x17')        REPLY=ctrl-w ;;
+    $'\x18')        REPLY=ctrl-x ;;
     *)              REPLY="$c" ;;
   esac
   return 0
@@ -1304,6 +1305,122 @@ confirm_remove() {
   return 0
 }
 
+# The picker's ^X: remove every group whose work has fully landed. A group
+# qualifies when each worktree is on the group's branch, has no uncommitted
+# changes, and that branch is merged (regular or squash) into the default
+# base. Stricter than `rm`'s own gate, which also accepts a pushed branch: a
+# pushed PR branch still has work in flight. Shows what goes and what stays
+# (and why) for one Remove/Cancel confirmation, then runs `cmd_rm` without
+# force flags per group, so its gates still apply, and recaps any failures.
+cleanup_flow() {
+  local base; base=$(default_base)
+  local i g repo src dirty unmerged why
+  local safe=() blocked=() blocked_why=()
+  _tty_clear
+  for i in "${!WT_GROUPS[@]}"; do
+    g=${WT_GROUPS[$i]}
+    paint "$(printf '%s  Checking %s (%d/%d)…%s\n' \
+      "$P_DIM" "$g" $(( i + 1 )) ${#WT_GROUPS[@]} "$P_RESET")"
+    why=''
+    if [[ -n "${WT_SUMMARIES[$i]}" ]]; then
+      why=${WT_SUMMARIES[$i]}
+    else
+      dirty=$(group_dirty_repos "$g")
+      if [[ -n "$dirty" ]]; then why="uncommitted changes in: $(echo $dirty)"; fi
+      unmerged=()
+      while IFS= read -r repo; do
+        src=$(source_dir "$repo")
+        branch_merged_into_base "$src" "$g" || unmerged+=("$repo")
+      done < <(group_repos "$g")
+      if (( ${#unmerged[@]} > 0 )); then
+        why+="${why:+; }not merged into $base in: ${unmerged[*]}"
+      fi
+    fi
+    if [[ -z "$why" ]]; then
+      safe+=("$g")
+    else
+      blocked+=("$g")
+      blocked_why+=("$why")
+    fi
+  done
+
+  local kept=''
+  if (( ${#blocked[@]} > 0 )); then
+    kept=$(
+      printf '\n  %sKeeping%s:\n' "$P_YELLOW$P_BOLD" "$P_RESET"
+      for i in "${!blocked[@]}"; do
+        printf '    %s  %s%s%s\n' "${blocked[$i]}" "$P_DIM" "${blocked_why[$i]}" "$P_RESET"
+      done
+    )
+  fi
+
+  local header sel pre
+  header=$(
+    printf '%s  Clean up merged worktree groups%s\n\n' "$P_BOLD" "$P_RESET"
+    if (( ${#safe[@]} > 0 )); then
+      printf '  %sWill remove%s (fully merged into %s, nothing uncommitted):\n' \
+        "$P_GREEN$P_BOLD" "$P_RESET" "$base"
+      for g in "${safe[@]}"; do printf '    %s\n' "$g"; done
+    else
+      printf '  %sNothing to clean up.%s\n' "$P_DIM" "$P_RESET"
+    fi
+    printf '%s\n' "$kept"
+  )
+
+  if (( ${#safe[@]} == 0 )); then
+    paint "$(printf '%s\n\n%s  Press any key to continue…%s\n' "$header" "$P_DIM" "$P_RESET")"
+    _read_key
+    return 1
+  fi
+
+  # Rows: 0 = Remove, 1 = Cancel. Unlike ^D, open focused on Cancel: this
+  # removes many groups at once, so ⏎ alone shouldn't do it.
+  sel=1
+  _tty_clear
+  while :; do
+    paint "$(
+      printf '%s\n\n' "$header"
+      if (( sel == 0 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s  Remove %d group(s)  %s\n' "$pre" "$P_RED$P_BOLD" ${#safe[@]} "$P_RESET"
+      if (( sel == 1 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s  Cancel  %s\n' "$pre" "$P_BOLD" "$P_RESET"
+      printf '\n  %s↑/↓%s move  %s⏎%s confirm  %sq%s cancel\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+    )"
+    _read_key
+    case "$REPLY" in
+      up|k|down|j) sel=$(( 1 - sel )) ;;
+      enter)       if (( sel == 0 )); then break; else return 1; fi ;;
+      q|esc)       return 1 ;;
+    esac
+  done
+
+  local failed=() failed_out=() out
+  _tty_clear
+  for g in "${safe[@]}"; do
+    printf '%s%s%s\n' "$P_BOLD" "$g" "$P_RESET" > "$TTY"
+    if ! out=$( cmd_rm "$g" 2>&1 ); then
+      failed+=("$g")
+      failed_out+=("$out")
+    fi
+    printf '%s\n\n' "$out" | sed 's/^/  /' > "$TTY"
+  done
+
+  printf '%s✓ Removed %d of %d group(s).%s\n' \
+    "$P_GREEN" $(( ${#safe[@]} - ${#failed[@]} )) ${#safe[@]} "$P_RESET" > "$TTY"
+  if (( ${#failed[@]} > 0 )); then
+    printf '\n%sCould not remove:%s\n' "$P_RED$P_BOLD" "$P_RESET" > "$TTY"
+    for i in "${!failed[@]}"; do
+      printf '  %s\n' "${failed[$i]}" > "$TTY"
+      printf '%s\n' "${failed_out[$i]}" | sed 's/^/    /' > "$TTY"
+    done
+  fi
+  printf '%s\n' "$kept" > "$TTY"
+  printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
+  _read_key
+  return 0
+}
+
 # Print a recap of everything removed this session (from RM_JOURNAL) to
 # stderr, once the alt screen is gone — so a stray `q` never hides the SHAs
 # needed to bring a branch back. stdout is reserved for the path to cd into.
@@ -1402,7 +1519,8 @@ create_flow() {
 # filters the source and group rows, fzf-style; the create row always stays.
 # On selecting the source or a group it prints that path to stdout (for the
 # Fish wrapper to cd into) and returns; the create row runs create_flow and
-# prints the new path; ^D removes the highlighted group in place.
+# prints the new path; ^D removes the highlighted group in place, ^X every
+# fully merged one (see cleanup_flow).
 # Refresh WT_GROUPS and the parallel WT_SUMMARIES (off-branch summary per group).
 # Summaries are computed here — once per list change — rather than in the render
 # path, so navigation keystrokes don't spawn git per group on every repaint.
@@ -1481,9 +1599,9 @@ picker_loop() {
           printf '%s%s\n' "$pre" "${WT_GROUPS[$(( rows[i] - 1 ))]}"
         fi
       done
-      printf '\n  %s↑/↓%s move  %s⏎%s open  %s^D%s remove  %s^W%s workspace  %sesc%s clear/quit\n' \
+      printf '\n  %s↑/↓%s move  %s⏎%s open  %s^D%s remove  %s^X%s clean up merged  %s^W%s workspace  %sesc%s clear/quit\n' \
         "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" \
-        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
     )"
 
     _read_key
@@ -1514,6 +1632,13 @@ picker_loop() {
       ctrl-d)
         if (( row >= 1 && row < create_row )); then
           confirm_remove "${WT_GROUPS[$(( row - 1 ))]}" || true
+          _tty_clear
+          _picker_refresh
+        fi
+        ;;
+      ctrl-x)
+        if (( ${#WT_GROUPS[@]} > 0 )); then
+          cleanup_flow || true
           _tty_clear
           _picker_refresh
         fi

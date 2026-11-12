@@ -479,7 +479,8 @@ different `bg=` line in the group's `.envrc` — re-runs won't touch it.
 `ls` has two faces. Through the Fish wrapper on a terminal it opens an
 interactive picker: type to fuzzy-filter (fzf-style), `↑/↓` to move, `⏎` to
 `cd` into a group (landing in its first repo), `^D` to remove one
-(a confirm dialog whose checkboxes map to the `--force-rm-*` flags), `^W` to
+(a confirm dialog whose checkboxes map to the `--force-rm-*` flags), `^X` to
+clean up every fully merged group at once (see below), `^W` to
 switch workspace, `Esc` to clear the filter (or quit when it's empty), or drop
 onto the trailing row to create a new group — which
 prompts for a name, a repo subset, and a base branch picked from every local
@@ -545,6 +546,14 @@ In the picker, `^D` asks only Remove / Cancel. The gates are then checked, and
 for each one that would actually lose data you get a y/N question (default N).
 On exit, the picker recaps every removal of the session on stderr, restore
 commands included, so a stray `Esc` never loses the SHAs.
+
+`^X` in the picker removes every group whose work has fully landed: each
+worktree on the group's branch, nothing uncommitted, and the branch merged
+into the default base, by regular merge or squash. That's stricter than `rm`'s
+own gate: a branch that's only pushed (an open PR) is kept. It lists what goes
+and what stays, with the reason, for one Remove/Cancel confirmation (focused
+on Cancel), then runs a plain `rm` per group and recaps any that failed. A
+group with no commits of its own yet counts as merged, so it goes too.
 
 **`rm` is idempotent.** If some repos are healthy and others are half-removed,
 re-running picks up where the last run left off:
