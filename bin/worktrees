@@ -1851,26 +1851,40 @@ delete_branch() {
 
 # Returns 0 if deleting branch <b> in <src> loses no commits, i.e. it has
 # landed in one of its trunks: its upstream, origin/<b>, the source's HEAD, or
-# the default base (remote and local flavor). "Landed" means the tip is
-# reachable from the trunk, or — for the default base — that the branch's net
-# change was squash-merged into it (same check as git-toolbelt's
-# `git cleanup -s`). Treats a non-existent branch ref as "safe".
+# the default base (see branch_merged_into_base). Treats a non-existent branch
+# ref as "safe".
 branch_safe_to_delete() {
   local src="$1" b="$2"
   git -C "$src" show-ref --verify --quiet "refs/heads/$b" || return 0
 
-  local base; base=$(default_base)
-  local trunks=() squash_trunks=("$base") t up
-  if [[ "$base" == origin/* ]]; then squash_trunks+=("${base#origin/}"); fi
+  local trunks=() t up
   up=$(git -C "$src" rev-parse --abbrev-ref --symbolic-full-name "$b@{upstream}" 2>/dev/null) || up=""
   if [[ -n "$up" ]]; then trunks+=("$up"); fi
-  trunks+=("origin/$b" HEAD "${squash_trunks[@]}")
+  trunks+=("origin/$b" HEAD)
 
   for t in "${trunks[@]}"; do
     git -C "$src" rev-parse --verify --quiet "$t^{commit}" >/dev/null || continue
     git -C "$src" merge-base --is-ancestor "refs/heads/$b" "$t" 2>/dev/null && return 0
   done
-  for t in "${squash_trunks[@]}"; do
+  branch_merged_into_base "$src" "$b"
+}
+
+# Returns 0 if branch <b> in <src> has landed in the default base (remote and
+# local flavor): its tip is reachable from it, or its net change was
+# squash-merged into it (same check as git-toolbelt's `git cleanup -s`).
+# Treats a non-existent branch ref as merged.
+branch_merged_into_base() {
+  local src="$1" b="$2"
+  git -C "$src" show-ref --verify --quiet "refs/heads/$b" || return 0
+
+  local base; base=$(default_base)
+  local trunks=("$base") t
+  if [[ "$base" == origin/* ]]; then trunks+=("${base#origin/}"); fi
+  for t in "${trunks[@]}"; do
+    git -C "$src" rev-parse --verify --quiet "$t^{commit}" >/dev/null || continue
+    git -C "$src" merge-base --is-ancestor "refs/heads/$b" "$t" 2>/dev/null && return 0
+  done
+  for t in "${trunks[@]}"; do
     git -C "$src" rev-parse --verify --quiet "$t^{commit}" >/dev/null || continue
     branch_squash_merged "$src" "$b" "$t" && return 0
   done
