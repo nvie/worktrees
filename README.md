@@ -433,7 +433,13 @@ tint group-aware. It defines:
   chosen group, and `init` `cd`s into the new one, so the `.envrc` loads
   without a second command. Everything else passes through.
 
-  You land in the group's **first repo**, not the group root. The root isn't a
+  From inside a repo, you land in **that same repo** in the chosen group:
+  switching never takes you to a different repo. If the group has no worktree
+  for it, `switch` refuses (pointing at `worktrees add`), and the picker asks
+  whether to add it first or cancel. Same for the source checkout row.
+
+  From anywhere else (a group root, the workspace root), you land in the
+  group's **first repo**, not the group root. The root isn't a
   repo, so `git` there reports whatever enclosing repo happens to exist — on a
   machine where `~` is a dotfiles repo, the prompt shows a branch with nothing
   to do with the group. The group's `.envrc` still loads from a repo below it,
@@ -478,7 +484,7 @@ different `bg=` line in the group's `.envrc` — re-runs won't touch it.
 
 `ls` has two faces. Through the Fish wrapper on a terminal it opens an
 interactive picker: type to fuzzy-filter (fzf-style), `↑/↓` to move, `⏎` to
-`cd` into a group (landing in its first repo), `^D` to remove one
+`cd` into a group (landing in the repo you're in, see above), `^D` to remove one
 (a confirm dialog whose checkboxes map to the `--force-rm-*` flags), `^X` to
 clean up every fully merged group at once (see below), `^W` to
 switch workspace, `Esc` to clear the filter (or quit when it's empty), or drop

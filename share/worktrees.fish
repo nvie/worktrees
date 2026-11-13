@@ -123,7 +123,8 @@ function worktrees
                 if string match -q -- '-*' $arg
                     continue
                 end
-                set -l target_path (command worktrees switch --print-path $arg 2>/dev/null)
+                # Fails, saying why, when the new group lacks the repo you're in.
+                set -l target_path (command worktrees switch --print-path $arg)
                 test -n "$target_path"; and cd "$target_path"
                 return 0
             end

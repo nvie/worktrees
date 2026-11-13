@@ -344,14 +344,43 @@ current_group() {
   printf '%s' "${rel%%/*}"
 }
 
-# Where to land when switching into <group>: its first repo's worktree, not
-# the group root. The root is not a repo, so `git` there reports whatever
-# enclosing repo happens to exist (~/Desktop lives inside a dotfiles repo on
-# this machine), and the prompt shows a branch that has nothing to do with the
-# group. The group's .envrc still loads from a repo below it, via the
-# source_up_if_exists stub ensure_source_up writes.
+# The workspace repo the current directory sits in, whether inside a group
+# (<workspace dir>/<group>/<repo>/…) or a source checkout (<source root>/<repo>/…).
+# Fails at a group root, the workspace root, or anywhere outside the workspace.
+current_repo() {
+  local cwd rel src
+  cwd=$(pwd -P)
+  src=$(cd "$SOURCE_ROOT" 2>/dev/null && pwd -P) || src="$SOURCE_ROOT"
+  if [[ "$cwd/" == "$(workspace_dir)/"* ]]; then
+    rel="${cwd#"$(workspace_dir)"/}"
+    [[ "$rel" == */* ]] || return 1             # at the group root
+    rel="${rel#*/}"
+  elif [[ "$cwd/" == "$src/"* ]]; then
+    rel="${cwd#"$src"/}"
+  else
+    return 1
+  fi
+  rel="${rel%%/*}"
+  [[ -n "$rel" ]] && repo_in_workspace "$rel" || return 1
+  printf '%s' "$rel"
+}
+
+# Where to land when switching into <group>. From inside a repo, that same
+# repo's worktree: switching groups never silently changes repos, so this
+# fails when <group> has no worktree for it (callers offer `add` or bail).
+# From anywhere else, the group's first repo rather than the group root. The
+# root is not a repo, so `git` there reports whatever enclosing repo happens
+# to exist (~/Desktop lives inside a dotfiles repo on this machine), and the
+# prompt shows a branch that has nothing to do with the group. The group's
+# .envrc still loads from a repo below it, via the source_up_if_exists stub
+# ensure_source_up writes.
 group_landing_dir() {
-  local name="$1" first
+  local name="$1" repo first
+  if repo=$(current_repo); then
+    [[ -d "$(group_dir "$name")/$repo" ]] || return 1
+    printf '%s/%s' "$(group_dir "$name")" "$repo"
+    return 0
+  fi
   first=$(group_repos "$name")      # not `| head -1`: SIGPIPE trips pipefail
   first="${first%%$'\n'*}"
   if [[ -n "$first" ]]; then
@@ -361,10 +390,13 @@ group_landing_dir() {
   fi
 }
 
-# The source checkout counterpart of group_landing_dir: the workspace's first
-# repo, so hopping between a group and its source lands in the same spot.
+# The source checkout counterpart of group_landing_dir: the repo you're in, or
+# the workspace's first repo, so hopping between a group and its source lands
+# in the same spot.
 source_landing_dir() {
-  printf '%s/%s' "$SOURCE_ROOT" "${REPOS[0]}"
+  local repo
+  repo=$(current_repo) || repo="${REPOS[0]}"
+  printf '%s/%s' "$SOURCE_ROOT" "$repo"
 }
 
 repo_in_workspace() {
@@ -914,7 +946,7 @@ cmd_init() {
   ok "Created: $(group_dir "$name")"
   info ""
   info "Next:"
-  info "  cd $(group_landing_dir "$name")"
+  info "  cd $(group_landing_dir "$name" || group_dir "$name")"
 }
 
 
@@ -1499,10 +1531,10 @@ _create_abort() {
 }
 
 # Prompt for a new group name and optional base branch, then run `cmd_init`.
-# On success, sets NEW_PATH to the created group's path and returns 0; returns
+# On success, sets NEW_GROUP to the created group's name and returns 0; returns
 # 1 if cancelled or init failed.
 create_flow() {
-  NEW_PATH=""
+  NEW_GROUP=""
   printf '\e[2J\e[H\e[?25h' > "$TTY"   # show cursor for line input
   {
     printf '%s  Create a new worktree group%s\n\n' "$P_BOLD" "$P_RESET"
@@ -1555,12 +1587,66 @@ create_flow() {
 
   printf '\e[2J\e[H' > "$TTY"
   if ( cmd_init "$name" ${base:+"$base"} --repos "$repo_csv" ) > "$TTY" 2>&1; then
-    NEW_PATH="$(group_landing_dir "$name")"
+    NEW_GROUP="$name"
     printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
     _read_key
     return 0
   fi
   printf '\n%s  init failed — press any key…%s' "$P_RED" "$P_RESET" > "$TTY"
+  _read_key
+  return 1
+}
+
+# Leave the picker for <group>, printing its landing dir for the Fish wrapper
+# to cd into. When you're in a repo that <group> has no worktree for, ask
+# first (confirm_add_repo) rather than land in some other repo. Returns 1,
+# with the picker still up, if that's cancelled or the add fails.
+open_group() {
+  local name="$1" path
+  if ! path=$(group_landing_dir "$name"); then
+    confirm_add_repo "$name" "$(current_repo)" || return 1
+    path=$(group_landing_dir "$name") || return 1
+  fi
+  _picker_done
+  printf '%s\n' "$path"
+}
+
+# Modal for open_group: <group> lacks a worktree for <repo>, the one you're
+# in. Either `add` it and continue, or cancel. Opens focused on Cancel: the
+# likeliest cause is picking the wrong group, and a stray ⏎ shouldn't create
+# a worktree.
+confirm_add_repo() {
+  local name="$1" repo="$2" sel=1 pre
+  _tty_clear
+  while :; do
+    paint "$(
+      printf '%s⚠  %s%s%s has no %s%s%s worktree%s\n\n' \
+        "$P_YELLOW$P_BOLD" "$P_RESET$P_BOLD" "$name" "$P_YELLOW$P_BOLD" \
+        "$P_RESET$P_BOLD" "$repo" "$P_YELLOW$P_BOLD" "$P_RESET"
+      printf '%s   You are in %s. Switching never takes you to a different repo.%s\n\n' \
+        "$P_DIM" "$repo" "$P_RESET"
+      if (( sel == 0 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s  Add %s to %s, then switch  %s\n' "$pre" "$P_GREEN$P_BOLD" "$repo" "$name" "$P_RESET"
+      if (( sel == 1 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s%s  Cancel  %s\n' "$pre" "$P_BOLD" "$P_RESET"
+      printf '\n  %s↑/↓%s move  %s⏎%s confirm  %sq%s cancel\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+    )"
+    _read_key
+    case "$REPLY" in
+      up|k|down|j) sel=$(( 1 - sel )) ;;
+      enter)       if (( sel == 0 )); then break; else return 1; fi ;;
+      q|esc)       return 1 ;;
+    esac
+  done
+
+  _tty_clear
+  if ( cmd_add "$repo" --group "$name" ) > "$TTY" 2>&1; then
+    printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
+    _read_key
+    return 0
+  fi
+  printf '\n%s  add failed — press any key…%s' "$P_RED" "$P_RESET" > "$TTY"
   _read_key
   return 1
 }
@@ -1667,17 +1753,17 @@ picker_loop() {
           printf '%s\n' "$(source_landing_dir)"
           return 0
         elif (( row == create_row )); then
-          if create_flow; then
-            _picker_done
-            printf '%s\n' "$NEW_PATH"
+          if create_flow && open_group "$NEW_GROUP"; then
             return 0
           fi
           _tty_clear
           _picker_refresh
         else
-          _picker_done
-          printf '%s\n' "$(group_landing_dir "${WT_GROUPS[$(( row - 1 ))]}")"
-          return 0
+          if open_group "${WT_GROUPS[$(( row - 1 ))]}"; then
+            return 0
+          fi
+          _tty_clear
+          _picker_refresh
         fi
         ;;
       ctrl-d)
@@ -1808,7 +1894,13 @@ cmd_switch() {
     fi
     exit 1
   fi
-  printf '%s\n' "$(group_landing_dir "$name")"
+  local path repo
+  if ! path=$(group_landing_dir "$name"); then
+    repo=$(current_repo)
+    err "Group '$name' has no $repo worktree, and switching never changes repos."
+    die "Add it first: worktrees add $repo --group $name"
+  fi
+  printf '%s\n' "$path"
 }
 
 
