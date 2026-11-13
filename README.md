@@ -547,13 +547,17 @@ for each one that would actually lose data you get a y/N question (default N).
 On exit, the picker recaps every removal of the session on stderr, restore
 commands included, so a stray `Esc` never loses the SHAs.
 
-`^X` in the picker removes every group whose work has fully landed: each
-worktree on the group's branch, nothing uncommitted, and the branch merged
-into the default base, by regular merge or squash. That's stricter than `rm`'s
-own gate: a branch that's only pushed (an open PR) is kept. It lists what goes
-and what stays, with the reason, for one Remove/Cancel confirmation (focused
-on Cancel), then runs a plain `rm` per group and recaps any that failed. A
-group with no commits of its own yet counts as merged, so it goes too.
+`^X` in the picker opens a checklist of all groups for bulk removal. Groups
+whose work has fully landed come pre-checked: each worktree on the group's
+branch, nothing uncommitted, and the branch merged into the default base, by
+regular merge or squash. That's stricter than `rm`'s own gate: a branch that's
+only pushed (an open PR) stays unchecked. Every other group is listed
+unchecked with the reason, and you can check it anyway (`space` or `⏎`
+toggles). `⏎` on Remove runs `rm` per checked group; if any of them would lose
+uncommitted changes or unmerged commits, you first get one y/N question
+(default N) covering them all, which maps to the `--force-rm-*` flags. Failures
+are recapped at the end. A group with no commits of its own yet counts as
+merged, so it's pre-checked too.
 
 **`rm` is idempotent.** If some repos are healthy and others are half-removed,
 re-running picks up where the last run left off:

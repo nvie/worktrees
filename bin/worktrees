@@ -1305,23 +1305,25 @@ confirm_remove() {
   return 0
 }
 
-# The picker's ^X: remove every group whose work has fully landed. A group
-# qualifies when each worktree is on the group's branch, has no uncommitted
-# changes, and that branch is merged (regular or squash) into the default
-# base. Stricter than `rm`'s own gate, which also accepts a pushed branch: a
-# pushed PR branch still has work in flight. Shows what goes and what stays
-# (and why) for one Remove/Cancel confirmation, then runs `cmd_rm` without
-# force flags per group, so its gates still apply, and recaps any failures.
+# The picker's ^X: bulk-remove groups from a checklist. Groups whose work has
+# fully landed come pre-checked: each worktree on the group's branch, nothing
+# uncommitted, and that branch merged (regular or squash) into the default
+# base. That's stricter than `rm`'s own gate, which also accepts a pushed
+# branch: a pushed PR branch still has work in flight. Every other group is
+# listed unchecked, with the reason, and can be checked by hand. ⏎ on Remove
+# asks one y/N question (default N) if the checked groups would lose
+# uncommitted changes or unmerged commits (→ the matching --force-rm-* flags),
+# then runs `cmd_rm` per group and recaps any failures.
 cleanup_flow() {
   local base; base=$(default_base)
   local i g repo src dirty unmerged why
-  local safe=() blocked=() blocked_why=()
+  local merged=() blocked=() blocked_why=() blocked_dirty=()
   _tty_clear
   for i in "${!WT_GROUPS[@]}"; do
     g=${WT_GROUPS[$i]}
     paint "$(printf '%s  Checking %s (%d/%d)…%s\n' \
       "$P_DIM" "$g" $(( i + 1 )) ${#WT_GROUPS[@]} "$P_RESET")"
-    why=''
+    why='' dirty=''
     if [[ -n "${WT_SUMMARIES[$i]}" ]]; then
       why=${WT_SUMMARIES[$i]}
     else
@@ -1337,69 +1339,115 @@ cleanup_flow() {
       fi
     fi
     if [[ -z "$why" ]]; then
-      safe+=("$g")
+      merged+=("$g")
     else
       blocked+=("$g")
       blocked_why+=("$why")
+      blocked_dirty+=("$dirty")
     fi
   done
 
-  local kept=''
-  if (( ${#blocked[@]} > 0 )); then
-    kept=$(
-      printf '\n  %sKeeping%s:\n' "$P_YELLOW$P_BOLD" "$P_RESET"
-      for i in "${!blocked[@]}"; do
-        printf '    %s  %s%s%s\n' "${blocked[$i]}" "$P_DIM" "${blocked_why[$i]}" "$P_RESET"
-      done
-    )
-  fi
+  # Rows: 0..n-1 = groups (merged ones first, pre-checked), n = Remove,
+  # n+1 = Cancel. ⏎ on a group toggles it, so only ⏎ on Remove removes.
+  local groups=("${merged[@]}" "${blocked[@]}")
+  local nm=${#merged[@]} n=${#groups[@]}
+  local marks=() force_wt=() force_br=()
+  for (( i = 0; i < n; i++ )); do marks[i]=$(( i < nm ? 1 : 0 )); done
 
-  local header sel pre
-  header=$(
-    printf '%s  Clean up merged worktree groups%s\n\n' "$P_BOLD" "$P_RESET"
-    if (( ${#safe[@]} > 0 )); then
-      printf '  %sWill remove%s (fully merged into %s, nothing uncommitted):\n' \
-        "$P_GREEN$P_BOLD" "$P_RESET" "$base"
-      for g in "${safe[@]}"; do printf '    %s\n' "$g"; done
-    else
-      printf '  %sNothing to clean up.%s\n' "$P_DIM" "$P_RESET"
-    fi
-    printf '%s\n' "$kept"
-  )
-
-  if (( ${#safe[@]} == 0 )); then
-    paint "$(printf '%s\n\n%s  Press any key to continue…%s\n' "$header" "$P_DIM" "$P_RESET")"
-    _read_key
-    return 1
-  fi
-
-  # Rows: 0 = Remove, 1 = Cancel. Unlike ^D, open focused on Cancel: this
-  # removes many groups at once, so ⏎ alone shouldn't do it.
-  sel=1
+  local sel=0 count pre box lost risky
   _tty_clear
   while :; do
+    count=0
+    for (( i = 0; i < n; i++ )); do count=$(( count + marks[i] )); done
     paint "$(
-      printf '%s\n\n' "$header"
-      if (( sel == 0 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
-      printf '%s%s  Remove %d group(s)  %s\n' "$pre" "$P_RED$P_BOLD" ${#safe[@]} "$P_RESET"
-      if (( sel == 1 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      printf '%s  Clean up worktree groups%s\n' "$P_BOLD" "$P_RESET"
+      for (( i = 0; i < n; i++ )); do
+        if (( i == 0 && nm > 0 )); then
+          printf '\n  %sFully merged%s into %s, nothing uncommitted:\n' \
+            "$P_GREEN$P_BOLD" "$P_RESET" "$base"
+        fi
+        if (( i == nm )); then
+          printf '\n  %sNot fully merged%s:\n' "$P_YELLOW$P_BOLD" "$P_RESET"
+        fi
+        if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+        if (( marks[i] == 1 )); then box="${P_GREEN}[x]${P_RESET}"; else box='[ ]'; fi
+        if (( i < nm )); then
+          printf '%s  %s %s\n' "$pre" "$box" "${groups[$i]}"
+        else
+          printf '%s  %s %s  %s%s%s\n' "$pre" "$box" "${groups[$i]}" \
+            "$P_DIM" "${blocked_why[$(( i - nm ))]}" "$P_RESET"
+        fi
+      done
+      printf '\n'
+      if (( sel == n )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
+      if (( count > 0 )); then
+        printf '%s%s  Remove %d group(s)  %s\n' "$pre" "$P_RED$P_BOLD" $count "$P_RESET"
+      else
+        printf '%s%s  Remove 0 groups  %s\n' "$pre" "$P_DIM" "$P_RESET"
+      fi
+      if (( sel == n + 1 )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
       printf '%s%s  Cancel  %s\n' "$pre" "$P_BOLD" "$P_RESET"
-      printf '\n  %s↑/↓%s move  %s⏎%s confirm  %sq%s cancel\n' \
-        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+      printf '\n  %s↑/↓%s move  %sspace%s toggle  %s⏎%s confirm  %sq%s cancel\n' \
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
     )"
     _read_key
     case "$REPLY" in
-      up|k|down|j) sel=$(( 1 - sel )) ;;
-      enter)       if (( sel == 0 )); then break; else return 1; fi ;;
-      q|esc)       return 1 ;;
+      up|k)   sel=$(( (sel - 1 + n + 2) % (n + 2) )) ;;
+      down|j) sel=$(( (sel + 1) % (n + 2) )) ;;
+      space)  if (( sel < n )); then marks[sel]=$(( 1 - marks[sel] )); fi ;;
+      q|esc)  return 1 ;;
+      enter)
+        if (( sel < n )); then marks[sel]=$(( 1 - marks[sel] )); continue; fi
+        if (( sel == n + 1 )); then return 1; fi
+        (( count > 0 )) || continue
+
+        # Checked groups that would lose work need one explicit y/N.
+        risky=''
+        for (( i = 0; i < n; i++ )); do
+          force_wt[i]=0 force_br[i]=0
+          (( i >= nm && marks[i] == 1 )) || continue
+          dirty=${blocked_dirty[$(( i - nm ))]}
+          lost=$(group_unmerged_repos "${groups[$i]}")
+          why=''
+          if [[ -n "$dirty" ]]; then
+            force_wt[i]=1
+            why="uncommitted changes in: $(echo $dirty)"
+          fi
+          if [[ -n "$lost" ]]; then
+            force_br[i]=1
+            why+="${why:+; }unmerged commits in: $(echo $lost)"
+          fi
+          if [[ -n "$why" ]]; then
+            risky+=$(printf '    %s  %s%s%s' "${groups[$i]}" "$P_DIM" "$why" "$P_RESET")$'\n'
+          fi
+        done
+        if [[ -z "$risky" ]]; then break; fi
+        paint "$(
+          printf '%s⚠  These checked groups would lose work:%s\n\n' "$P_RED$P_BOLD" "$P_RESET"
+          printf '%s\n' "$risky"
+          printf '  Uncommitted changes stay recoverable from the Trash; unmerged\n'
+          printf '  commits have their SHAs shown so you can restore them.\n\n'
+          printf '  Remove anyway? %s[y/N]%s ' "$P_BOLD" "$P_RESET"
+        )"
+        _read_key
+        if [[ "$REPLY" == y || "$REPLY" == Y ]]; then break; fi
+        ;;
     esac
   done
 
-  local failed=() failed_out=() out
+  local flags failed=() failed_out=() kept=() out
   _tty_clear
-  for g in "${safe[@]}"; do
+  for (( i = 0; i < n; i++ )); do
+    g=${groups[$i]}
+    if (( marks[i] == 0 )); then
+      if (( i < nm )); then kept+=("$g"); else kept+=("$g  $P_DIM${blocked_why[$(( i - nm ))]}$P_RESET"); fi
+      continue
+    fi
+    flags=()
+    if (( force_wt[i] == 1 )); then flags+=(--force-rm-worktree); fi
+    if (( force_br[i] == 1 )); then flags+=(--force-rm-branch); fi
     printf '%s%s%s\n' "$P_BOLD" "$g" "$P_RESET" > "$TTY"
-    if ! out=$( cmd_rm "$g" 2>&1 ); then
+    if ! out=$( cmd_rm "$g" "${flags[@]}" 2>&1 ); then
       failed+=("$g")
       failed_out+=("$out")
     fi
@@ -1407,7 +1455,7 @@ cleanup_flow() {
   done
 
   printf '%s✓ Removed %d of %d group(s).%s\n' \
-    "$P_GREEN" $(( ${#safe[@]} - ${#failed[@]} )) ${#safe[@]} "$P_RESET" > "$TTY"
+    "$P_GREEN" $(( count - ${#failed[@]} )) $count "$P_RESET" > "$TTY"
   if (( ${#failed[@]} > 0 )); then
     printf '\n%sCould not remove:%s\n' "$P_RED$P_BOLD" "$P_RESET" > "$TTY"
     for i in "${!failed[@]}"; do
@@ -1415,7 +1463,10 @@ cleanup_flow() {
       printf '%s\n' "${failed_out[$i]}" | sed 's/^/    /' > "$TTY"
     done
   fi
-  printf '%s\n' "$kept" > "$TTY"
+  if (( ${#kept[@]} > 0 )); then
+    printf '\n%sKept%s:\n' "$P_YELLOW$P_BOLD" "$P_RESET" > "$TTY"
+    for g in "${kept[@]}"; do printf '  %s\n' "$g" > "$TTY"; done
+  fi
   printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
   _read_key
   return 0
