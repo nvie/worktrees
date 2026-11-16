@@ -1176,34 +1176,65 @@ collect_all_local_branches() {
   done | sort -u
 }
 
-# A generic vertical menu over the items passed after the title. Renders to the
-# tty with a scrolling viewport, sets REPLY to the chosen 0-based index and
-# returns 0, or returns 1 if cancelled (q/Esc).
+# A generic vertical menu over the items passed after the title. Typing fuzzy-
+# filters the items, fzf-style (matched against their text without ANSI
+# colors). Renders to the tty with a scrolling viewport, sets REPLY to the
+# chosen item's 0-based index in the original list and returns 0, or returns 1
+# if cancelled (Esc on an empty filter).
 _menu_select() {
   local title="$1"; shift
   local items=("$@")
-  local n=${#items[@]} sel=0 off=0 vis=15 i pre
+  local plain=() rows=() query='' sel=0 off=0 vis=15 i pre
+  shopt -s extglob
+  for i in "${!items[@]}"; do plain+=("${items[$i]//$'\e['*([0-9;])m/}"); done
+  shopt -u extglob
   _tty_clear
   while :; do
+    rows=()
+    for i in "${!plain[@]}"; do
+      if _fuzzy_match "${plain[$i]}" "$query"; then rows+=("$i"); fi
+    done
+    if (( sel >= ${#rows[@]} )); then sel=$(( ${#rows[@]} - 1 )); fi
+    if (( sel < 0 )); then sel=0; fi
     if (( sel < off )); then off=$sel; fi
     if (( sel >= off + vis )); then off=$(( sel - vis + 1 )); fi
     paint "$(
-      printf '%s  %s%s\n\n' "$P_BOLD" "$title" "$P_RESET"
+      printf '%s  %s%s\n' "$P_BOLD" "$title" "$P_RESET"
+      if [[ -n "$query" ]]; then
+        printf '  %s❯%s %s%s▏%s\n\n' "$P_CYAN" "$P_RESET" "$query" "$P_DIM" "$P_RESET"
+      else
+        printf '  %s❯ type to filter%s\n\n' "$P_DIM" "$P_RESET"
+      fi
+      if (( ${#rows[@]} == 0 )); then printf '%s  No matches.%s\n' "$P_DIM" "$P_RESET"; fi
       if (( off > 0 )); then printf '  %s↑ more%s\n' "$P_DIM" "$P_RESET"; fi
-      for (( i = off; i < off + vis && i < n; i++ )); do
+      for (( i = off; i < off + vis && i < ${#rows[@]}; i++ )); do
         if (( i == sel )); then pre="${P_CYAN}▸ ${P_RESET}"; else pre='  '; fi
-        printf '%s%s\n' "$pre" "${items[$i]}"
+        printf '%s%s\n' "$pre" "${items[${rows[$i]}]}"
       done
-      if (( off + vis < n )); then printf '  %s↓ more%s\n' "$P_DIM" "$P_RESET"; fi
-      printf '\n  %s↑/↓%s move  %s⏎%s select  %sq%s cancel\n' \
+      if (( off + vis < ${#rows[@]} )); then printf '  %s↓ more%s\n' "$P_DIM" "$P_RESET"; fi
+      printf '\n  %s↑/↓%s move  %s⏎%s select  %sesc%s clear/cancel\n' \
         "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
     )"
     _read_key
     case "$REPLY" in
-      up|k)   sel=$(( (sel - 1 + n) % n )) ;;
-      down|j) sel=$(( (sel + 1) % n )) ;;
-      enter)  REPLY=$sel; return 0 ;;
-      q|esc)  return 1 ;;
+      up|ctrl-p)   sel=$(( sel - 1 )) ;;
+      down|ctrl-n) sel=$(( sel + 1 )) ;;
+      backspace)   query=${query%?}; sel=0 ;;
+      ctrl-u)      query=''; sel=0 ;;
+      enter)
+        if (( ${#rows[@]} > 0 )); then REPLY=${rows[$sel]}; return 0; fi
+        ;;
+      esc)
+        if [[ -z "$query" ]]; then return 1; fi
+        query=''
+        sel=0
+        ;;
+      *)
+        if (( ${#REPLY} == 1 )) && [[ "$REPLY" == [[:print:]] ]]; then
+          query+="$REPLY"
+          sel=0
+        fi
+        ;;
     esac
   done
 }
