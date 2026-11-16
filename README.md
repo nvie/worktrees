@@ -492,6 +492,9 @@ onto the trailing row to create a new group — which
 prompts for a name, a repo subset, and a base branch picked (type to filter) from every local
 branch across the workspace's repos.
 
+Removing the group you're in (via `^D` or `^X`) is fine: the shell lands in
+the same repo's source checkout when the picker exits.
+
 Started from somewhere that implies no workspace, the picker opens on the
 workspace list instead of erroring.
 

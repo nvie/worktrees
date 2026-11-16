@@ -1363,6 +1363,7 @@ confirm_remove() {
 
   _tty_clear
   ( cmd_rm "$name" "${flags[@]}" ) > "$TTY" 2>&1 || true
+  _left_group_if_removed "$name"
   printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
   _read_key
   return 0
@@ -1514,6 +1515,7 @@ cleanup_flow() {
       failed+=("$g")
       failed_out+=("$out")
     fi
+    _left_group_if_removed "$g"
     printf '%s\n\n' "$out" | sed 's/^/  /' > "$TTY"
   done
 
@@ -1711,6 +1713,28 @@ _picker_done() {
   rm -f "$RM_JOURNAL"
 }
 
+# The group the shell sits in, and the source checkout counterpart to fall back
+# to when the picker removes it. Captured once at startup, while the cwd still
+# exists: once the group is in the Trash, the repo you were in can no longer
+# be derived from it.
+PICKER_GROUP_DIR=""
+PICKER_SOURCE_DIR=""
+# Where the shell should cd on a plain exit (Esc), if anywhere.
+PICKER_EXIT_DIR=""
+
+# Call after the picker tried to remove <group>. If that was the group the
+# shell sits in and it's gone now, move this process to the source checkout,
+# so landing-dir logic keeps resolving the repo you were in, and have the shell
+# follow there on exit.
+_left_group_if_removed() {
+  local dir; dir=$(group_dir "$1")
+  [[ -n "$PICKER_GROUP_DIR" && "$dir" == "$PICKER_GROUP_DIR" && ! -d "$dir" ]] || return 0
+  cd "$PICKER_SOURCE_DIR" || return 0
+  unset WORKTREE_GROUP WORKTREE_ROOT
+  PICKER_GROUP_DIR=""
+  PICKER_EXIT_DIR="$PICKER_SOURCE_DIR"
+}
+
 picker_loop() {
   RM_JOURNAL=$(mktemp)
   trap '_picker_done' EXIT
@@ -1722,6 +1746,12 @@ picker_loop() {
   if (( WORKSPACE_OK == 0 )) && ! workspace_picker; then
     _picker_done
     return 0
+  fi
+
+  local g
+  if g=$(current_group); then
+    PICKER_GROUP_DIR=$(group_dir "$g")
+    PICKER_SOURCE_DIR=$(source_landing_dir)
   fi
 
   _picker_refresh
@@ -1824,6 +1854,7 @@ picker_loop() {
           sel=0
         else
           _picker_done
+          if [[ -n "$PICKER_EXIT_DIR" ]]; then printf '%s\n' "$PICKER_EXIT_DIR"; fi
           return 0
         fi
         ;;
