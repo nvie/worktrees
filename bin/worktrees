@@ -1104,8 +1104,20 @@ P_DIM=$'\e[2m'; P_BOLD=$'\e[1m'
 P_RED=$'\e[31m'; P_GREEN=$'\e[32m'; P_YELLOW=$'\e[33m'
 P_BLUE=$'\e[34m'; P_CYAN=$'\e[36m'; P_RESET=$'\e[0m'
 
-_tty_setup()   { printf '\e[?1049h\e[?25l' > "$TTY"; }   # alt screen, hide cursor
-_tty_restore() { printf '\e[?25h\e[?1049l' > "$TTY"; }   # show cursor, primary screen
+# Besides the alt screen, the TUI keeps the tty non-canonical and unechoed for
+# its whole lifetime, not just during each `read`: otherwise bytes that arrive
+# in a burst (alt-backspace is ESC ^?) hit the cooked line discipline between
+# reads, which eats ^?/^U/^W as its own erase/kill before _read_key sees them.
+TTY_SAVED=""
+_tty_setup() {
+  TTY_SAVED=$(stty -g < "$TTY")
+  stty -icanon -echo min 1 time 0 < "$TTY"
+  printf '\e[?1049h\e[?25l' > "$TTY"   # alt screen, hide cursor
+}
+_tty_restore() {
+  printf '\e[?25h\e[?1049l' > "$TTY"   # show cursor, primary screen
+  if [[ -n "$TTY_SAVED" ]]; then stty "$TTY_SAVED" < "$TTY"; TTY_SAVED=""; fi
+}
 
 # Blank the screen + home the cursor. Used once when switching between distinct
 # screens (picker → dialog → create) so a differently-shaped previous screen
@@ -1122,28 +1134,55 @@ paint() {
   printf '\e[H%s\e[K\e[J' "${frame//$'\n'/$'\e[K'$'\n'}" > "$TTY"
 }
 
-# Read one logical keypress from the tty into REPLY: up down left right enter
-# space esc backspace ctrl-{d,n,p,u,w,x}, or the literal character otherwise.
-# Decodes the common arrow-key escape sequences (ESC [ A/B/C/D).
+# Read one logical keypress from the tty into REPLY: up down left right home
+# end delete enter space esc backspace, ctrl-{a,b,d,e,f,k,n,p,u,w,x},
+# ctrl-{left,right}, alt-{b,d,f,left,right,backspace}, `other` for any other
+# escape sequence, or the literal character otherwise. Escape sequences are
+# consumed whole, so an unknown one never leaks into the input as text.
 _read_key() {
-  local c rest
+  local c seq=""
   IFS= read -rsn1 c < "$TTY" || { REPLY=q; return 0; }
   case "$c" in
     $'\e')
-      read -rsn2 -t 0.01 rest < "$TTY" || rest=""
-      case "$rest" in
-        '[A') REPLY=up ;;
-        '[B') REPLY=down ;;
-        '[C') REPLY=right ;;
-        '[D') REPLY=left ;;
-        '')   REPLY=esc ;;
-        *)    REPLY=other ;;
+      if ! IFS= read -rsn1 -t 0.01 c < "$TTY"; then REPLY=esc; return 0; fi
+      case "$c" in
+        '['|O)
+          # CSI/SS3: parameter bytes up to a final letter or `~`.
+          while IFS= read -rsn1 -t 0.01 c < "$TTY"; do
+            seq+="$c"
+            case "$c" in [A-Za-z~]) break ;; esac
+          done
+          case "$seq" in
+            A)               REPLY=up ;;
+            B)               REPLY=down ;;
+            C)               REPLY=right ;;
+            D)               REPLY=left ;;
+            H|1~|7~)         REPLY=home ;;
+            F|4~|8~)         REPLY=end ;;
+            3~)              REPLY=delete ;;
+            '1;3C'|'1;9C')   REPLY=alt-right ;;
+            '1;3D'|'1;9D')   REPLY=alt-left ;;
+            '1;5C')          REPLY=ctrl-right ;;
+            '1;5D')          REPLY=ctrl-left ;;
+            *)               REPLY=other ;;
+          esac
+          ;;
+        b)              REPLY=alt-b ;;
+        d)              REPLY=alt-d ;;
+        f)              REPLY=alt-f ;;
+        $'\x7f'|$'\b')  REPLY=alt-backspace ;;
+        *)              REPLY=other ;;
       esac
       ;;
     ''|$'\r'|$'\n') REPLY=enter ;;
     ' ')            REPLY=space ;;
     $'\x7f'|$'\b')  REPLY=backspace ;;
+    $'\x01')        REPLY=ctrl-a ;;
+    $'\x02')        REPLY=ctrl-b ;;
     $'\x04')        REPLY=ctrl-d ;;
+    $'\x05')        REPLY=ctrl-e ;;
+    $'\x06')        REPLY=ctrl-f ;;
+    $'\x0b')        REPLY=ctrl-k ;;
     $'\x0e')        REPLY=ctrl-n ;;
     $'\x10')        REPLY=ctrl-p ;;
     $'\x15')        REPLY=ctrl-u ;;
@@ -1151,6 +1190,72 @@ _read_key() {
     $'\x18')        REPLY=ctrl-x ;;
     *)              REPLY="$c" ;;
   esac
+  return 0
+}
+
+# Print the position of the word boundary before (<dir> = -1) or after (1)
+# <pos> in <line>, readline-style: skip separators, then the word. Words are
+# runs of <wordchars> (a bracket expression's contents, e.g. `[:alnum:]`).
+_line_word_boundary() {
+  local line="$1" pos="$2" dir="$3" wordchars="$4" i="$2" n=${#1}
+  if (( dir < 0 )); then
+    while (( i > 0 )) && [[ "${line:i-1:1}" != [$wordchars] ]]; do i=$(( i - 1 )); done
+    while (( i > 0 )) && [[ "${line:i-1:1}" == [$wordchars] ]]; do i=$(( i - 1 )); done
+  else
+    while (( i < n )) && [[ "${line:i:1}" != [$wordchars] ]]; do i=$(( i + 1 )); done
+    while (( i < n )) && [[ "${line:i:1}" == [$wordchars] ]]; do i=$(( i + 1 )); done
+  fi
+  printf '%d' "$i"
+}
+
+# Read a line of text below <frame> with readline's emacs-mode editing keys
+# (cursor motion by char/word/line, backspace/delete, kill word/to start/to
+# end), independent of the tty's erase setting. Sets REPLY and returns 0 on ⏎;
+# returns 1 on esc.
+_read_line() {
+  local frame="$1" line="" pos=0 to
+  printf '\e[?25h' > "$TTY"   # show cursor for line input
+  while :; do
+    paint "$frame$line"
+    if (( pos < ${#line} )); then printf '\e[%dD' $(( ${#line} - pos )) > "$TTY"; fi
+    _read_key
+    case "$REPLY" in
+      enter)  break ;;
+      esc)    printf '\e[?25l' > "$TTY"; return 1 ;;
+      left|ctrl-b)   pos=$(( pos > 0 ? pos - 1 : 0 )) ;;
+      right|ctrl-f)  pos=$(( pos < ${#line} ? pos + 1 : pos )) ;;
+      home|ctrl-a)   pos=0 ;;
+      end|ctrl-e)    pos=${#line} ;;
+      alt-left|alt-b|ctrl-left)
+        pos=$(_line_word_boundary "$line" "$pos" -1 '[:alnum:]') ;;
+      alt-right|alt-f|ctrl-right)
+        pos=$(_line_word_boundary "$line" "$pos" 1 '[:alnum:]') ;;
+      backspace)
+        if (( pos > 0 )); then line="${line:0:pos-1}${line:pos}"; pos=$(( pos - 1 )); fi ;;
+      delete|ctrl-d) line="${line:0:pos}${line:pos+1}" ;;
+      ctrl-u)        line="${line:pos}"; pos=0 ;;
+      ctrl-k)        line="${line:0:pos}" ;;
+      ctrl-w|alt-backspace)
+        # ctrl-w kills a whitespace-delimited word, alt-backspace an alnum one.
+        if [[ "$REPLY" == ctrl-w ]]; then
+          to=$(_line_word_boundary "$line" "$pos" -1 '^[:space:]')
+        else
+          to=$(_line_word_boundary "$line" "$pos" -1 '[:alnum:]')
+        fi
+        line="${line:0:to}${line:pos}"; pos=$to ;;
+      alt-d)
+        to=$(_line_word_boundary "$line" "$pos" 1 '[:alnum:]')
+        line="${line:0:pos}${line:to}" ;;
+      *)
+        if [[ "$REPLY" == space ]]; then REPLY=' '; fi
+        if (( ${#REPLY} == 1 )) && [[ "$REPLY" == [[:print:]] ]]; then
+          line="${line:0:pos}$REPLY${line:pos}"; pos=$(( pos + 1 ))
+        fi
+        ;;
+    esac
+  done
+  printf '\e[?25l' > "$TTY"
+  REPLY="$line"
   return 0
 }
 
@@ -1577,18 +1682,15 @@ _create_abort() {
 # 1 if cancelled or init failed.
 create_flow() {
   NEW_GROUP=""
-  printf '\e[2J\e[H\e[?25h' > "$TTY"   # show cursor for line input
-  {
-    printf '%s  Create a new worktree group%s\n\n' "$P_BOLD" "$P_RESET"
-    printf '%s  Leave the name empty to cancel.%s\n\n' "$P_DIM" "$P_RESET"
-    printf '  Name: '
-  } > "$TTY"
-
+  _tty_clear
   local name
-  IFS= read -r name < "$TTY" || { printf '\e[?25l' > "$TTY"; return 1; }
-  name="${name#"${name%%[![:space:]]*}"}"   # ltrim
-  name="${name%"${name##*[![:space:]]}"}"   # rtrim
-  printf '\e[?25l' > "$TTY"
+  _read_line "$(
+    printf '%s  Create a new worktree group%s\n\n' "$P_BOLD" "$P_RESET"
+    printf '%s  Leave the name empty or press esc to cancel.%s\n\n' "$P_DIM" "$P_RESET"
+    printf '  Name: '
+  )" || return 1
+  name="${REPLY#"${REPLY%%[![:space:]]*}"}"   # ltrim
+  name="${name%"${name##*[![:space:]]}"}"     # rtrim
   [[ -n "$name" ]] || return 1
 
   # Strict allowlist: a group name maps to a directory and a branch in five
