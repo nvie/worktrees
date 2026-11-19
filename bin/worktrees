@@ -1616,14 +1616,11 @@ cleanup_flow() {
     esac
   done
 
-  local flags failed=() failed_out=() kept=() out
+  local flags failed=() failed_out=() out
   _tty_clear
   for (( i = 0; i < n; i++ )); do
     g=${groups[$i]}
-    if (( marks[i] == 0 )); then
-      if (( i < nm )); then kept+=("$g"); else kept+=("$g  $P_DIM${blocked_why[$(( i - nm ))]}$P_RESET"); fi
-      continue
-    fi
+    (( marks[i] == 1 )) || continue
     flags=()
     if (( force_wt[i] == 1 )); then flags+=(--force-rm-worktree); fi
     if (( force_br[i] == 1 )); then flags+=(--force-rm-branch); fi
@@ -1644,10 +1641,6 @@ cleanup_flow() {
       printf '  %s\n' "${failed[$i]}" > "$TTY"
       printf '%s\n' "${failed_out[$i]}" | sed 's/^/    /' > "$TTY"
     done
-  fi
-  if (( ${#kept[@]} > 0 )); then
-    printf '\n%sKept%s:\n' "$P_YELLOW$P_BOLD" "$P_RESET" > "$TTY"
-    for g in "${kept[@]}"; do printf '  %s\n' "$g" > "$TTY"; done
   fi
   printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
   _read_key
