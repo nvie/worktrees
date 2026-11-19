@@ -125,7 +125,10 @@ function worktrees
                 end
                 # Fails, saying why, when the new group lacks the repo you're in.
                 set -l target_path (command worktrees switch --print-path $arg)
-                test -n "$target_path"; and cd "$target_path"
+                if test -n "$target_path"
+                    cd "$target_path"
+                    printf '\nNow in %s\n' "$target_path"
+                end
                 return 0
             end
             return 0

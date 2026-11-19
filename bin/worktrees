@@ -944,9 +944,6 @@ cmd_init() {
   finalize_group  "$name"         "${GROUP_REPOS[@]}"
 
   ok "Created: $(group_dir "$name")"
-  info ""
-  info "Next:"
-  info "  cd $(group_landing_dir "$name" || group_dir "$name")"
 }
 
 
@@ -1109,14 +1106,19 @@ P_BLUE=$'\e[34m'; P_CYAN=$'\e[36m'; P_RESET=$'\e[0m'
 # in a burst (alt-backspace is ESC ^?) hit the cooked line discipline between
 # reads, which eats ^?/^U/^W as its own erase/kill before _read_key sees them.
 TTY_SAVED=""
+# Both are idempotent (TTY_SAVED doubles as the "TUI is up" flag): an unpaired
+# ESC[?1049l would restore a stale saved cursor position.
 _tty_setup() {
+  [[ -z "$TTY_SAVED" ]] || return 0
   TTY_SAVED=$(stty -g < "$TTY")
   stty -icanon -echo min 1 time 0 < "$TTY"
   printf '\e[?1049h\e[?25l' > "$TTY"   # alt screen, hide cursor
 }
 _tty_restore() {
+  [[ -n "$TTY_SAVED" ]] || return 0
   printf '\e[?25h\e[?1049l' > "$TTY"   # show cursor, primary screen
-  if [[ -n "$TTY_SAVED" ]]; then stty "$TTY_SAVED" < "$TTY"; TTY_SAVED=""; fi
+  stty "$TTY_SAVED" < "$TTY"
+  TTY_SAVED=""
 }
 
 # Blank the screen + home the cursor. Used once when switching between distinct
@@ -1732,11 +1734,11 @@ create_flow() {
 
   local repo_csv; repo_csv=$(IFS=,; printf '%s' "${chosen_repos[*]}")
 
-  printf '\e[2J\e[H' > "$TTY"
+  # Run init on the primary screen, so its summary stays in the scrollback
+  # after the picker exits, and keys typed meanwhile reach the shell.
+  _tty_restore
   if ( cmd_init "$name" ${base:+"$base"} --repos "$repo_csv" ) > "$TTY" 2>&1; then
     NEW_GROUP="$name"
-    printf '\n%s  Press any key to continue…%s' "$P_DIM" "$P_RESET" > "$TTY"
-    _read_key
     return 0
   fi
   printf '\n%s  init failed — press any key…%s' "$P_RED" "$P_RESET" > "$TTY"
@@ -1747,14 +1749,17 @@ create_flow() {
 # Leave the picker for <group>, printing its landing dir for the Fish wrapper
 # to cd into. When you're in a repo that <group> has no worktree for, ask
 # first (confirm_add_repo) rather than land in some other repo. Returns 1,
-# with the picker still up, if that's cancelled or the add fails.
+# with the picker still up, if that's cancelled or the add fails. With
+# --announce, also print "Now in <dir>" to the terminal on the way out.
 open_group() {
-  local name="$1" path
+  local name="$1" announce="${2:-}" path
   if ! path=$(group_landing_dir "$name"); then
+    _tty_setup
     confirm_add_repo "$name" "$(current_repo)" || return 1
     path=$(group_landing_dir "$name") || return 1
   fi
   _picker_done
+  if [[ "$announce" == --announce ]]; then printf '\nNow in %s\n' "$path" > "$TTY"; fi
   printf '%s\n' "$path"
 }
 
@@ -1852,7 +1857,8 @@ _left_group_if_removed() {
 # The picker's create row and ^A: run create_flow and open the new group,
 # returning 0 once it's open. Otherwise redraw the picker and return 1.
 _picker_create() {
-  if create_flow && open_group "$NEW_GROUP"; then return 0; fi
+  if create_flow && open_group "$NEW_GROUP" --announce; then return 0; fi
+  _tty_setup
   _tty_clear
   _picker_refresh
   return 1
