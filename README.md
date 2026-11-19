@@ -561,8 +561,8 @@ whose work has fully landed come pre-checked: each worktree on the group's
 branch, nothing uncommitted, and the branch merged into the default base, by
 regular merge or squash. That's stricter than `rm`'s own gate: a branch that's
 only pushed (an open PR) stays unchecked. Every other group is listed
-unchecked with the reason, and you can check it anyway (`space` or `⏎`
-toggles). `⏎` on Remove runs `rm` per checked group; if any of them would lose
+unchecked with the reason, and you can check it anyway (`space` toggles; `⏎`
+on a group jumps to Remove). `⏎` on Remove runs `rm` per checked group; if any of them would lose
 uncommitted changes or unmerged commits, you first get one y/N question
 (default N) covering them all, which maps to the `--force-rm-*` flags. Failures
 are recapped at the end. A group with no commits of its own yet counts as

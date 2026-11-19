@@ -1528,7 +1528,8 @@ cleanup_flow() {
   done
 
   # Rows: 0..n-1 = groups (merged ones first, pre-checked), n = Remove,
-  # n+1 = Cancel. ⏎ on a group toggles it, so only ⏎ on Remove removes.
+  # n+1 = Cancel. ⏎ on a group jumps to Remove, so removing always takes a
+  # second, deliberate ⏎ on that row.
   local groups=("${merged[@]}" "${blocked[@]}")
   local nm=${#merged[@]} n=${#groups[@]}
   local marks=() force_wt=() force_br=()
@@ -1577,7 +1578,7 @@ cleanup_flow() {
       space)  if (( sel < n )); then marks[sel]=$(( 1 - marks[sel] )); fi ;;
       q|esc)  return 1 ;;
       enter)
-        if (( sel < n )); then marks[sel]=$(( 1 - marks[sel] )); continue; fi
+        if (( sel < n )); then sel=$n; continue; fi
         if (( sel == n + 1 )); then return 1; fi
         (( count > 0 )) || continue
 
