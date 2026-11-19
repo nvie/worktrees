@@ -1634,7 +1634,7 @@ cleanup_flow() {
   done
 
   printf '%s✓ Removed %d of %d group(s).%s\n' \
-    "$P_GREEN" $(( count - ${#failed[@]} )) $count "$P_RESET" > "$TTY"
+    "$P_RED$P_BOLD" $(( count - ${#failed[@]} )) $count "$P_RESET" > "$TTY"
   if (( ${#failed[@]} > 0 )); then
     printf '\n%sCould not remove:%s\n' "$P_RED$P_BOLD" "$P_RESET" > "$TTY"
     for i in "${!failed[@]}"; do
