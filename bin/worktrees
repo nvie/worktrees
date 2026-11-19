@@ -1802,8 +1802,8 @@ confirm_add_repo() {
 # its branch), existing groups, and a trailing "create" row. Typing fuzzy-
 # filters the source and group rows, fzf-style; the create row always stays.
 # On selecting the source or a group it prints that path to stdout (for the
-# Fish wrapper to cd into) and returns; the create row runs create_flow and
-# prints the new path; ^D removes the highlighted group in place, ^X every
+# Fish wrapper to cd into) and returns; the create row (or ^A from anywhere)
+# runs create_flow and prints the new path; ^D removes the highlighted group in place, ^X every
 # fully merged one (see cleanup_flow).
 # Refresh WT_GROUPS and the parallel WT_SUMMARIES (off-branch summary per group).
 # Summaries are computed here — once per list change — rather than in the render
@@ -1847,6 +1847,15 @@ _left_group_if_removed() {
   unset WORKTREE_GROUP WORKTREE_ROOT
   PICKER_GROUP_DIR=""
   PICKER_EXIT_DIR="$PICKER_SOURCE_DIR"
+}
+
+# The picker's create row and ^A: run create_flow and open the new group,
+# returning 0 once it's open. Otherwise redraw the picker and return 1.
+_picker_create() {
+  if create_flow && open_group "$NEW_GROUP"; then return 0; fi
+  _tty_clear
+  _picker_refresh
+  return 1
 }
 
 picker_loop() {
@@ -1911,9 +1920,10 @@ picker_loop() {
           printf '%s%s\n' "$pre" "${WT_GROUPS[$(( rows[i] - 1 ))]}"
         fi
       done
-      printf '\n  %s↑/↓%s move  %s⏎%s open  %s^D%s remove  %s^X%s clean up merged  %s^W%s workspace  %sesc%s clear/quit\n' \
+      printf '\n  %s↑/↓%s move  %s⏎%s open  %s^A%s new group  %s^D%s remove  %s^X%s clean up merged  %s^W%s workspace  %sesc%s clear/quit\n' \
         "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" \
-        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET"
+        "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" "$P_DIM" "$P_RESET" \
+        "$P_DIM" "$P_RESET"
     )"
 
     _read_key
@@ -1928,11 +1938,7 @@ picker_loop() {
           printf '%s\n' "$(source_landing_dir)"
           return 0
         elif (( row == create_row )); then
-          if create_flow && open_group "$NEW_GROUP"; then
-            return 0
-          fi
-          _tty_clear
-          _picker_refresh
+          if _picker_create; then return 0; fi
         else
           if open_group "${WT_GROUPS[$(( row - 1 ))]}"; then
             return 0
@@ -1940,6 +1946,9 @@ picker_loop() {
           _tty_clear
           _picker_refresh
         fi
+        ;;
+      ctrl-a)
+        if _picker_create; then return 0; fi
         ;;
       ctrl-d)
         if (( row >= 1 && row < create_row )); then

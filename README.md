@@ -488,7 +488,7 @@ interactive picker: type to fuzzy-filter (fzf-style), `↑/↓` to move, `⏎` t
 (a confirm dialog whose checkboxes map to the `--force-rm-*` flags), `^X` to
 clean up every fully merged group at once (see below), `^W` to
 switch workspace, `Esc` to clear the filter (or quit when it's empty), or drop
-onto the trailing row to create a new group — which
+onto the trailing row (or press `^A` from anywhere) to create a new group — which
 prompts for a name, a repo subset, and a base branch picked (type to filter) from every local
 branch across the workspace's repos.
 
