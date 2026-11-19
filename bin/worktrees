@@ -1240,14 +1240,23 @@ _menu_select() {
 }
 
 # A multi-select over <items...>: space toggles, `a`/`n` select all/none, ⏎
-# confirms. Everything starts selected. Sets REPLY to the chosen items,
+# confirms. Only the items in <checked> (space-separated) start selected, with
+# the cursor on the first of them. Sets REPLY to the chosen items,
 # space-separated, and returns 0; returns 1 if cancelled.
 _menu_multiselect() {
-  local title="$1"; shift
+  local title="$1" checked=" $2 "; shift 2
   local items=("$@")
-  local n=${#items[@]} sel=0 i pre box
+  local n=${#items[@]} sel=-1 i pre box
   local marks=() chosen=()
-  for (( i = 0; i < n; i++ )); do marks[i]=1; done
+  for (( i = 0; i < n; i++ )); do
+    if [[ "$checked" == *" ${items[$i]} "* ]]; then
+      marks[i]=1
+      if (( sel < 0 )); then sel=$i; fi
+    else
+      marks[i]=0
+    fi
+  done
+  if (( sel < 0 )); then sel=0; fi
   _tty_clear
   while :; do
     paint "$(
@@ -1598,9 +1607,12 @@ create_flow() {
   # Repo selection. A group may cover a subset of the workspace — you usually
   # know up front which repos a feature will touch, and leaving the rest out
   # keeps the group small. `worktrees add` widens it later if you were wrong.
-  local chosen_repos=("${REPOS[@]}")
+  # Starts with just the repo you're in checked (all of them when you're in
+  # none), so the usual single-repo group is one ⏎ away.
+  local chosen_repos=("${REPOS[@]}") checked
   if (( ${#REPOS[@]} > 1 )); then
-    _menu_multiselect "Repos for '$name'" "${REPOS[@]}" || return 1
+    checked=$(current_repo) || checked="${REPOS[*]}"
+    _menu_multiselect "Repos for '$name'" "$checked" "${REPOS[@]}" || return 1
     read -r -a chosen_repos <<< "$REPLY"
   fi
 
